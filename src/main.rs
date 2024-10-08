@@ -1,4 +1,5 @@
 use goldberg::{goldberg_stmts, goldberg_string as s};
+use indicatif::{ProgressBar, ProgressStyle};
 use qbsdiff::Bspatch;
 use reqwest;
 use std::env;
@@ -15,7 +16,21 @@ use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
 use winapi::um::handleapi::INVALID_HANDLE_VALUE;
 use winapi::um::processenv::GetStdHandle;
 use winapi::um::winbase::STD_OUTPUT_HANDLE;
+use winapi::um::wincon::SetConsoleTitleW;
 use winapi::um::wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+
+fn set_window_title(title: &str) {
+    let wide: Vec<u16> = OsStr::new(title)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        SetConsoleTitleW(wide.as_ptr());
+    }
+}
 
 fn enable_ansi_support() {
     unsafe {
@@ -45,11 +60,40 @@ fn apply_patch(old_file: &Path, patch_data: &[u8], new_file: &Path) -> io::Resul
 }
 
 fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut response = reqwest::blocking::get(url)?;
+    let client = reqwest::blocking::Client::new();
+    let mut response = client.get(url).send()?;
+
+    if !response.status().is_success() {
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::Other,
+            format!("HTTP error: {}", response.status()),
+        )));
+    }
+
+    let total_size = response.content_length().unwrap_or(0);
+
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] [{bar:30.cyan/blue}] {bytes}/{total_bytes} (ETA: {eta_precise})")
+        .progress_chars("=>-"));
+
     let mut file = File::create(path)?;
-    io::copy(&mut response, &mut file)?;
+    let mut downloaded: u64 = 0;
+    let mut buffer = [0; 8192]; // 8KB buffer
+
+    while let Ok(n) = response.read(&mut buffer) {
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])?;
+        downloaded += n as u64;
+        pb.set_position(downloaded);
+    }
+
+    pb.finish_with_message("Download completed");
     Ok(())
 }
+
 
 fn apply_update(update_zip_path: &Path) -> io::Result<()> {
     println!("{}", s!("Update file found. Preparing to extract..."));
@@ -61,14 +105,16 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
     println!("{}", s!("Applying update..."));
     let total_files = archive.len();
 
+    let pb = ProgressBar::new(total_files as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} files (ETA: {eta_precise})")
+        .progress_chars("=>-"));
+
     let current_exe = env::current_exe()?;
     let current_exe_name = current_exe.file_name().unwrap().to_str().unwrap();
 
     for i in 0..total_files {
-        print!("\r\x1B[2K");
-        let progress_percentage = (i + 1) as f32 / total_files as f32 * 100.0;
-        print!("Progress: {:.1}%", progress_percentage);
-        io::stdout().flush()?;
+        pb.set_position(i as u64 + 1);
 
         let mut file = archive.by_index(i)?;
         let outpath = PathBuf::from(file.name());
@@ -103,19 +149,41 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
             io::copy(&mut file, &mut outfile)?;
         }
     }
-    println!("\n{}", s!("Update applied successfully."));
+
+    pb.finish_with_message("Update applied successfully.");
     Ok(())
+}
+
+fn cleanup() {
+    let update_zip_path = PathBuf::from("update.zip");
+    println!("{}", s!("Cleaning up temporary files..."));
+    if let Err(e) = fs::remove_file(&update_zip_path) {
+        eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
+    }
+    println!("{}", s!("Cleanup completed."));
+}
+
+fn wait_for_key_press() {
+    println!("\nPress any key to exit...");
+    let mut buffer = [0u8; 1];
+    std::io::stdin().read_exact(&mut buffer).unwrap();
 }
 
 fn main() {
     enable_ansi_support();
+    set_window_title("DREAMIO: AI-Powered Adventures - Updater");
 
     let update_zip_path = PathBuf::from("update.zip");
     let version_file_path = Path::new("version");
     let latest_url = "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/latest.zip";
 
     goldberg_stmts! {
-        println!("{}", s!("\x1b[34mDREAMIO: AI-Powered Adventures - Updater\n\x1b[37m"));
+        println!("{}", s!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  "));
+        println!("{}", s!(" |   \\| _ \\ __| /_\\ |  \\/  |_ _/ _ \\ "));
+        println!("{}", s!(" | |) |   / _| / _ \\| |\\/| || | (_) |"));
+        println!("{}", s!(" |___/|_|_\\___/_/ \\_\\_|  |_|___\\___/ "));
+        println!("{}", s!("                                     "));
+        println!("{}", s!(" DREAMIO: AI-Powered Adventures - Updater\n\x1b[37m"));
 
         println!("{}", s!("Checking for running game process..."));
         let mut processes = sysinfo::System::new_all();
@@ -128,6 +196,7 @@ fn main() {
 
                 if !process.kill() {
                     eprintln!("{}", s!("\x1b[31mError shutting down the game!\x1b[37m"));
+                    wait_for_key_press();
                     exit(1);
                 }
                 process_to_kill = Some(*pid);
@@ -149,53 +218,46 @@ fn main() {
         }
 
         if !update_zip_path.exists() && !version_file_path.exists() {
-            println!("{}", s!("No update.zip or version file found. Downloading latest update."));
+            println!("{}", s!("Downloading latest update."));
 
             match download_file(latest_url, &update_zip_path) {
                 Ok(_) => {
                     println!("Successfully downloaded latest update.");
                     if let Err(e) = apply_update(&update_zip_path) {
-                        eprintln!("Failed to apply update: {}", e);
+                        eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
+                        cleanup();
+                        wait_for_key_press();
                         exit(1);
                     }
-                    println!("{}", s!("Cleaning up temporary files..."));
-                    if let Err(e) = fs::remove_file(&update_zip_path) {
-                        eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
-                    }
-                    println!("{}", s!("Cleanup completed."));
+                    cleanup();
                 },
                 Err(e) => {
-                    eprintln!("Error downloading latest update: {}", e);
+                    eprintln!("\x1b[31mError downloading latest update: {}\x1b[37m", e);
+                    wait_for_key_press();
                     exit(1);
                 }
             }
         } else if !update_zip_path.exists() && version_file_path.exists() {
-            println!("{}", s!("No update.zip found. Checking for updates based on version file."));
-
             loop {
-                let version = fs::read_to_string(version_file_path)
-                    .expect("Failed to read version file");
+                let version = fs::read_to_string(version_file_path).expect("Failed to read version file");
                 let version = version.trim();
 
                 let download_url = format!("https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/{}.zip", version);
 
-                println!("Attempting to download update: {}", download_url);
+                println!("Attempting to download update for version {}", version);
 
                 match download_file(&download_url, &update_zip_path) {
                     Ok(_) => {
                         println!("Successfully downloaded update.");
                         if let Err(e) = apply_update(&update_zip_path) {
-                            eprintln!("Failed to apply update: {}", e);
+                            eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
+                            cleanup();
+                            wait_for_key_press();
                             exit(1);
                         }
-                        println!("{}", s!("Cleaning up temporary files..."));
-                        if let Err(e) = fs::remove_file(&update_zip_path) {
-                            eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
-                        }
-                        println!("{}", s!("Cleanup completed."));
+                        cleanup();
 
-                        let new_version = fs::read_to_string(version_file_path)
-                            .expect("Failed to read updated version file");
+                        let new_version = fs::read_to_string(version_file_path).expect("Failed to read updated version file");
                         if new_version.trim() == version {
                             println!("Update complete. No more updates available.");
                             break;
@@ -206,27 +268,27 @@ fn main() {
                             println!("No more updates available.");
                             break;
                         } else {
-                            eprintln!("Error downloading update: {}", e);
+                            eprintln!("\x1b[31mError downloading update: {}\x1b[37m", e);
+                            wait_for_key_press();
                             exit(1);
                         }
                     }
                 }
             }
         } else if !update_zip_path.exists() {
-            eprintln!("{}", s!("\x1b[31m\nNo update file (update.zip) found!\x1b[37m"));
+            eprintln!("{}", s!("\x1b[31mNo update file (update.zip) found!\x1b[37m"));
+            wait_for_key_press();
             exit(1);
         }
 
         if update_zip_path.exists() {
             if let Err(e) = apply_update(&update_zip_path) {
-                eprintln!("Failed to apply update: {}", e);
+                eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
+                cleanup();
+                wait_for_key_press();
                 exit(1);
             }
-            println!("{}", s!("Cleaning up temporary files..."));
-            if let Err(e) = fs::remove_file(&update_zip_path) {
-                eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
-            }
-            println!("{}", s!("Cleanup completed."));
+            cleanup();
         }
 
         println!("{}", s!("Restarting the game..."));
