@@ -11,6 +11,7 @@ sysinfo = "0.28.2"
 goldberg = "0.1.0"
 winapi = { version = "0.3", features = ["wincon", "consoleapi", "processenv", "winbase", "handleapi"] }
 qbsdiff = "1.4"
+reqwest = { version = "0.11", features = ["blocking"] }
 
 [profile.release]
 strip = true
