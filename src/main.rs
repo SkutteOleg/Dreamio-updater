@@ -1,13 +1,13 @@
 use goldberg::{goldberg_stmts, goldberg_string as s};
 use std::fs::{self, File};
-use std::io::{self, Write, Read};
+use std::io::{self, Write, Read, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 use std::thread;
 use std::time::Duration;
 use sysinfo::{ProcessExt, SystemExt};
 use zip::ZipArchive;
-use bsdiff;
+use qbsdiff::Bspatch;
 use std::env;
 
 use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
@@ -31,12 +31,12 @@ fn enable_ansi_support() {
     }
 }
 
-fn apply_patch(old_file: &Path, patch_file: &Path, new_file: &Path) -> io::Result<()> {
+fn apply_patch(old_file: &Path, patch_data: &[u8], new_file: &Path) -> io::Result<()> {
     let old_contents = fs::read(old_file)?;
-    let patch_contents = fs::read(patch_file)?;
     let mut new_contents = Vec::new();
 
-    bsdiff::patch(&old_contents, &mut patch_contents.as_slice(), &mut new_contents)?;
+    let patcher = Bspatch::new(patch_data)?;
+    patcher.apply(&old_contents, Cursor::new(&mut new_contents))?;
 
     fs::write(new_file, &new_contents)?;
 
@@ -122,7 +122,6 @@ fn main() {
             } else if file.name().ends_with(".patch") {
                 // Handle patch files
                 let original_file = outpath.with_extension("");
-                let temp_patch_file = outpath.with_extension("tmp");
 
                 let mut patch_data = Vec::new();
                 if let Err(e) = file.read_to_end(&mut patch_data) {
@@ -130,17 +129,8 @@ fn main() {
                     continue;
                 }
 
-                if let Err(e) = fs::write(&temp_patch_file, &patch_data) {
-                    eprintln!("\x1b[31mFailed to create temporary patch file {}: {}\x1b[37m", temp_patch_file.display(), e);
-                    continue;
-                }
-
-                if let Err(e) = apply_patch(&original_file, &temp_patch_file, &original_file) {
+                if let Err(e) = apply_patch(&original_file, &patch_data, &original_file) {
                     eprintln!("\n\x1b[31mFailed to apply patch to {}: {}\x1b[37m", original_file.display(), e);
-                }
-
-                if let Err(e) = fs::remove_file(&temp_patch_file) {
-                    eprintln!("\x1b[31mFailed to remove temporary patch file {}: {}\x1b[37m", temp_patch_file.display(), e);
                 }
             } else if file.name().ends_with(".delete") {
                 // Handle delete files
