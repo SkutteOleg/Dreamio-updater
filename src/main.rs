@@ -1,6 +1,5 @@
 use goldberg::{goldberg_stmts, goldberg_string as s};
 use std::fs;
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process::{exit, Command};
@@ -9,7 +8,6 @@ use std::time::Duration;
 use sysinfo::{ProcessExt, SystemExt};
 use zip::ZipArchive;
 
-use std::io::Write;
 use winapi::um::wincon::{ENABLE_VIRTUAL_TERMINAL_PROCESSING};
 use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
 use winapi::um::processenv::GetStdHandle;
