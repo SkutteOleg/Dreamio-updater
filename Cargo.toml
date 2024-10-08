@@ -1,0 +1,18 @@
+[package]
+name = "DreamioUpdater"
+version = "1.0.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+zip = "0.6.4"
+sysinfo = "0.28.2"
+goldberg = "0.1.0"
+
+[profile.release]
+strip = true
+panic = "abort"
+opt-level = "z"
+debug = false
+lto = true
