@@ -1,6 +1,5 @@
 use goldberg::{goldberg_stmts, goldberg_string as s};
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::process::{exit, Command};
 use std::thread;
