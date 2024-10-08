@@ -9,9 +9,33 @@ use std::time::Duration;
 use sysinfo::{ProcessExt, SystemExt};
 use zip::ZipArchive;
 
+use std::io::Write;
+use winapi::um::wincon::{ENABLE_VIRTUAL_TERMINAL_PROCESSING};
+use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
+use winapi::um::processenv::GetStdHandle;
+use winapi::um::winbase::STD_OUTPUT_HANDLE;
+use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+
+fn enable_ansi_support() {
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle == INVALID_HANDLE_VALUE {
+            return;
+        }
+        let mut original_mode: u32 = 0;
+        if GetConsoleMode(handle, &mut original_mode) == 0 {
+            return;
+        }
+        let mode = original_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        SetConsoleMode(handle, mode);
+    }
+}
+
 fn main() {
+    enable_ansi_support();
+
     goldberg_stmts! {
-        println!("{}", s!("\x1b[34mDREAMIO: AI-Powered Adventures - Updater\n"));    
+        println!("{}", s!("\x1b[34mDREAMIO: AI-Powered Adventures - Updater\n\x1b[37m"));
     
         let mut processes = sysinfo::System::new_all();
         processes.refresh_all();
@@ -19,10 +43,10 @@ fn main() {
         let mut process_to_kill = None;
         for (pid, process) in processes.processes() {
             if process.name() == "Dreamio.exe" {
-                println!("{}", s!("\x1b[37mShutting down the game..."));
+                println!("{}", s!("Shutting down the game..."));
     
                 if !process.kill() {
-                    eprintln!("{}", s!("\x1b[31mError shutting down the game!"));
+                    eprintln!("{}", s!("\x1b[31mError shutting down the game!\x1b[37m"));
                     exit(1);
                 }
                 process_to_kill = Some(*pid);
@@ -43,7 +67,7 @@ fn main() {
         let update_zip_path = Path::new(&string);    
     
         if !update_zip_path.exists() {
-            eprintln!("{}", s!("\x1b[31m\nNo update found!"));
+            eprintln!("{}", s!("\x1b[31m\nNo update found!\x1b[37m"));
             exit(1);
         }
 
@@ -86,6 +110,6 @@ fn main() {
             .spawn()
             .expect("Failed to restart the game");
 
-        println!("{}", s!("\x1b[32m\nDone!"));
+        println!("{}", s!("\x1b[32m\nDone!\x1b[37m"));
     }
 }

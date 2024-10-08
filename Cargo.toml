@@ -9,6 +9,7 @@ edition = "2021"
 zip = "0.6.4"
 sysinfo = "0.28.2"
 goldberg = "0.1.0"
+winapi = { version = "0.3", features = ["wincon", "consoleapi", "processenv", "winbase", "handleapi"] }
 
 [profile.release]
 strip = true
