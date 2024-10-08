@@ -1,12 +1,14 @@
 use goldberg::{goldberg_stmts, goldberg_string as s};
-use std::fs;
-use std::io::Write;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{self, Write, Read};
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 use std::thread;
 use std::time::Duration;
 use sysinfo::{ProcessExt, SystemExt};
 use zip::ZipArchive;
+use bsdiff;
+use std::env;
 
 use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
 use winapi::um::handleapi::INVALID_HANDLE_VALUE;
@@ -27,6 +29,18 @@ fn enable_ansi_support() {
         let mode = original_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         SetConsoleMode(handle, mode);
     }
+}
+
+fn apply_patch(old_file: &Path, patch_file: &Path, new_file: &Path) -> io::Result<()> {
+    let old_contents = fs::read(old_file)?;
+    let patch_contents = fs::read(patch_file)?;
+    let mut new_contents = Vec::new();
+
+    bsdiff::patch(&old_contents, &mut patch_contents.as_slice(), &mut new_contents)?;
+
+    fs::write(new_file, &new_contents)?;
+
+    Ok(())
 }
 
 fn main() {
@@ -80,41 +94,89 @@ fn main() {
         let reader = std::io::Cursor::new(update_zip_data);
         let mut archive = ZipArchive::new(reader).expect("Failed to open update.zip");
 
-        println!("{}", s!("Extracting update files..."));
+        println!("{}", s!("Applying update..."));
         let total_files = archive.len();
-        let file_names: Vec<String> = archive.file_names().map(|f| f.to_string()).collect();
 
-        for (i, file_name) in file_names.iter().enumerate() {
+        let current_exe = env::current_exe().expect("Failed to get current executable path");
+        let current_exe_name = current_exe.file_name().expect("Failed to get executable name").to_str().expect("Failed to convert OsStr to str");
+
+        for i in 0..total_files {
             print!("\r\x1B[2K");
             let progress_percentage = (i + 1) as f32 / total_files as f32 * 100.0;
             print!("Progress: {:.1}%", progress_percentage);
             std::io::stdout().flush().unwrap();
 
-            let mut file = archive.by_name(file_name).expect("Failed to access file in archive");
-            let outpath = file.mangled_name();
+            let mut file = archive.by_index(i).expect("Failed to access file in archive");
+            let outpath = PathBuf::from(file.name());
 
-            if file_name.ends_with('/') {
-                fs::create_dir_all(&outpath).expect("Failed to create directory");
+            // Skip if the file is the current executable
+            if outpath.file_name().map(|f| f == current_exe_name).unwrap_or(false) {
+                continue;
+            }
+
+            if file.name().ends_with('/') {
+                if let Err(e) = fs::create_dir_all(&outpath) {
+                    eprintln!("\x1b[31mFailed to create directory {}: {}\x1b[37m", outpath.display(), e);
+                    continue;
+                }
+            } else if file.name().ends_with(".patch") {
+                // Handle patch files
+                let original_file = outpath.with_extension("");
+                let temp_patch_file = outpath.with_extension("tmp");
+
+                let mut patch_data = Vec::new();
+                if let Err(e) = file.read_to_end(&mut patch_data) {
+                    eprintln!("\x1b[31mFailed to read patch data for {}: {}\x1b[37m", file.name(), e);
+                    continue;
+                }
+
+                if let Err(e) = fs::write(&temp_patch_file, &patch_data) {
+                    eprintln!("\x1b[31mFailed to create temporary patch file {}: {}\x1b[37m", temp_patch_file.display(), e);
+                    continue;
+                }
+
+                if let Err(e) = apply_patch(&original_file, &temp_patch_file, &original_file) {
+                    eprintln!("\n\x1b[31mFailed to apply patch to {}: {}\x1b[37m", original_file.display(), e);
+                }
+
+                if let Err(e) = fs::remove_file(&temp_patch_file) {
+                    eprintln!("\x1b[31mFailed to remove temporary patch file {}: {}\x1b[37m", temp_patch_file.display(), e);
+                }
+            } else if file.name().ends_with(".delete") {
+                // Handle delete files
+                let file_to_delete = outpath.with_extension("");
+                if file_to_delete.exists() {
+                    if let Err(e) = fs::remove_file(&file_to_delete) {
+                        eprintln!("\x1b[31mFailed to delete file {}: {}\x1b[37m", file_to_delete.display(), e);
+                    }
+                }
             } else {
+                // Handle new files
                 if let Some(parent) = outpath.parent() {
                     if !parent.exists() {
-                        fs::create_dir_all(&parent).expect("Failed to create directory");
+                        if let Err(e) = fs::create_dir_all(&parent) {
+                            eprintln!("\x1b[31mFailed to create directory {}: {}\x1b[37m", parent.display(), e);
+                            continue;
+                        }
                     }
                 }
 
-                let mut outfile = match fs::File::create(&outpath) {
-                    Ok(file) => file,
-                    Err(_e) => {
-                        continue;
-                    }
-                };
-                std::io::copy(&mut file, &mut outfile).expect("Failed to copy file");
+                match File::create(&outpath) {
+                    Ok(mut outfile) => {
+                        if let Err(e) = std::io::copy(&mut file, &mut outfile) {
+                            eprintln!("\x1b[31mFailed to copy file {}: {}\x1b[37m", outpath.display(), e);
+                        }
+                    },
+                    Err(e) => eprintln!("\x1b[31mFailed to create file {}: {}\x1b[37m", outpath.display(), e),
+                }
             }
         }
-        println!("\n{}", s!("All files extracted successfully."));
+        println!("\n{}", s!("Update applied successfully."));
 
         println!("{}", s!("Cleaning up temporary files..."));
-        fs::remove_file(update_zip_path).expect("Failed to remove update.zip");
+        if let Err(e) = fs::remove_file(update_zip_path) {
+            eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
+        }
         println!("{}", s!("Cleanup completed."));
 
         println!("{}", s!("Restarting the game..."));

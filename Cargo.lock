@@ -6,6 +6,7 @@ version = 4
 name = "DreamioUpdater"
 version = "1.0.0"
 dependencies = [
+ "bsdiff",
  "goldberg",
  "sysinfo",
  "winapi",
@@ -43,6 +44,12 @@ checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "bsdiff"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7f2e6c4f2a017f63b5a1fd7cc437f061b53a3e890bcca840ef756d72f6b72f2"
 
 [[package]]
 name = "byteorder"
