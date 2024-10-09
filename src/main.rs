@@ -2,6 +2,7 @@ use goldberg::{goldberg_stmts, goldberg_string as s};
 use indicatif::{ProgressBar, ProgressStyle};
 use qbsdiff::Bspatch;
 use reqwest;
+use serde_json::Value;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
@@ -94,6 +95,17 @@ fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
+    let url = "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/version.json";
+    let response = reqwest::blocking::get(url)?;
+    let json: Value = response.json()?;
+
+    let update_url = json["updateUrl"].as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid updateUrl in JSON"))?
+        .to_string();
+
+    Ok(update_url)
+}
 
 fn apply_update(update_zip_path: &Path) -> io::Result<()> {
     println!("{}", s!("Update file found. Preparing to extract..."));
@@ -205,7 +217,6 @@ fn main() {
 
     let update_zip_path = PathBuf::from("update.zip");
     let version_file_path = Path::new("version");
-    let latest_url = "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/latest.zip";
 
     goldberg_stmts! {
         println!("{}", s!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  "));
@@ -247,10 +258,19 @@ fn main() {
             println!("{}", s!("No running game process found."));
         }
 
+        let latest_url = match get_latest_update_url() {
+            Ok(url) => url,
+            Err(e) => {
+                eprintln!("\x1b[31mFailed to get latest update URL: {}\x1b[37m", e);
+                wait_for_key_press();
+                exit(1);
+            }
+        };
+
         if !update_zip_path.exists() && !version_file_path.exists() {
             println!("{}", s!("Downloading latest update."));
 
-            match download_file(latest_url, &update_zip_path) {
+            match download_file(&latest_url, &update_zip_path) {
                 Ok(_) => {
                     println!("Successfully downloaded latest update.");
                     if let Err(e) = apply_update(&update_zip_path) {
