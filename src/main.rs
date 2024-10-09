@@ -95,6 +95,24 @@ fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+fn handle_error(message: &str, error: &dyn std::error::Error) -> ! {
+    eprintln!("\x1b[31m{}: {}\x1b[37m", message, error);
+    cleanup();
+    wait_for_key_press();
+    exit(1);
+}
+
+fn download_and_apply_update(
+    url: &str,
+    update_zip_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    download_file(url, update_zip_path)?;
+    println!("Successfully downloaded update.");
+    apply_update(update_zip_path)?;
+    cleanup();
+    Ok(())
+}
+
 fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/version.json";
     let response = reqwest::blocking::get(url)?;
@@ -264,11 +282,13 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
 
 fn cleanup() {
     let update_zip_path = PathBuf::from("update.zip");
-    println!("{}", s!("Cleaning up temporary files..."));
-    if let Err(e) = fs::remove_file(&update_zip_path) {
-        eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
+    if update_zip_path.exists() {
+        println!("{}", s!("Cleaning up temporary files..."));
+        if let Err(e) = fs::remove_file(&update_zip_path) {
+            eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
+        }
+        println!("{}", s!("Cleanup completed."));
     }
-    println!("{}", s!("Cleanup completed."));
 }
 
 fn wait_for_key_press() {
@@ -321,50 +341,21 @@ fn main() {
 
         if !update_zip_path.exists() && !version_file_path.exists() {
             println!("{}", s!("Downloading latest update."));
-
             match get_latest_update_url() {
                 Ok(latest_url) => {
-                    match download_file(&latest_url, &update_zip_path) {
-                        Ok(_) => {
-                            println!("Successfully downloaded latest update.");
-                            if let Err(e) = apply_update(&update_zip_path) {
-                                eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
-                                cleanup();
-                                wait_for_key_press();
-                                exit(1);
-                            }
-                            cleanup();
-                        },
-                        Err(e) => {
-                            eprintln!("\x1b[31mError downloading latest update: {}\x1b[37m", e);
-                            wait_for_key_press();
-                            exit(1);
-                        }
+                    if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path) {
+                        handle_error("Failed to download or apply update", &*e);
                     }
                 },
-                Err(e) => {
-                    eprintln!("\x1b[31mFailed to get latest update URL: {}\x1b[37m", e);
-                    wait_for_key_press();
-                    exit(1);
-                }
+                Err(e) => handle_error("Failed to get latest update URL", &*e),
             }
         } else if !update_zip_path.exists() && version_file_path.exists() {
             loop {
                 match get_version_info() {
                     Ok((version_code, update_url)) => {
                         println!("Attempting to download update for version {}", version_code);
-
-                        match download_file(&update_url, &update_zip_path) {
+                        match download_and_apply_update(&update_url, &update_zip_path) {
                             Ok(_) => {
-                                println!("Successfully downloaded update.");
-                                if let Err(e) = apply_update(&update_zip_path) {
-                                    eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
-                                    cleanup();
-                                    wait_for_key_press();
-                                    exit(1);
-                                }
-                                cleanup();
-
                                 match get_version_info() {
                                     Ok((new_version_code, _)) => {
                                         if new_version_code == version_code {
@@ -372,11 +363,7 @@ fn main() {
                                             break;
                                         }
                                     },
-                                    Err(e) => {
-                                        eprintln!("\x1b[31mFailed to read updated version info: {}\x1b[37m", e);
-                                        wait_for_key_press();
-                                        exit(1);
-                                    }
+                                    Err(e) => handle_error("Failed to read updated version info", &*e),
                                 }
                             },
                             Err(e) => {
@@ -384,32 +371,24 @@ fn main() {
                                     println!("No more updates available.");
                                     break;
                                 } else {
-                                    eprintln!("\x1b[31mError downloading update: {}\x1b[37m", e);
-                                    wait_for_key_press();
-                                    exit(1);
+                                    handle_error("Error downloading update", &*e);
                                 }
                             }
                         }
                     },
-                    Err(e) => {
-                        eprintln!("\x1b[31mFailed to read version info: {}\x1b[37m", e);
-                        wait_for_key_press();
-                        exit(1);
-                    }
+                    Err(e) => handle_error("Failed to read version info", &*e),
                 }
             }
         } else if !update_zip_path.exists() {
-            eprintln!("{}", s!("\x1b[31mNo update file (update.zip) found!\x1b[37m"));
-            wait_for_key_press();
-            exit(1);
+            handle_error(
+                "No update file (update.zip) found!",
+                &io::Error::new(io::ErrorKind::NotFound, "update.zip not found")
+            );
         }
 
         if update_zip_path.exists() {
             if let Err(e) = apply_update(&update_zip_path) {
-                eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
-                cleanup();
-                wait_for_key_press();
-                exit(1);
+                handle_error("Failed to apply update", &e);
             }
             cleanup();
         }
