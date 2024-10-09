@@ -118,9 +118,24 @@ fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid versionCode in JSON"))?
         .to_string();
 
-    let update_url = format!("https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/{}.zip", version_code);
+    let update_url = format!(
+        "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/{}.zip",
+        version_code
+    );
 
     Ok((version_code, update_url))
+}
+
+fn print_header() {
+    println!("{}", s!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  "));
+    println!("{}", s!(" |   \\| _ \\ __| /_\\ |  \\/  |_ _/ _ \\ "));
+    println!("{}", s!(" | |) |   / _| / _ \\| |\\/| || | (_) |"));
+    println!("{}", s!(" |___/|_|_\\___/_/ \\_\\_|  |_|___\\___/ "));
+    println!("{}", s!("                                     "));
+    println!(
+        "{}",
+        s!(" DREAMIO: AI-Powered Adventures - Updater\n\x1b[37m")
+    );
 }
 
 fn apply_update(update_zip_path: &Path) -> io::Result<()> {
@@ -159,9 +174,9 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
             }
         };
 
-        let outpath = PathBuf::from(file.name());
+        let out_path = PathBuf::from(file.name());
 
-        if outpath
+        if out_path
             .file_name()
             .map(|f| f == current_exe_name)
             .unwrap_or(false)
@@ -170,16 +185,16 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
         }
 
         if file.name().ends_with('/') {
-            if let Err(e) = fs::create_dir_all(&outpath) {
+            if let Err(e) = fs::create_dir_all(&out_path) {
                 eprintln!(
                     "\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m",
-                    outpath.display(),
+                    out_path.display(),
                     e
                 );
                 continue;
             }
         } else if file.name().ends_with(".patch") {
-            let original_file = outpath.with_extension("");
+            let original_file = out_path.with_extension("");
             let mut patch_data = Vec::new();
             if let Err(e) = file.read_to_end(&mut patch_data) {
                 eprintln!(
@@ -198,7 +213,7 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
                 continue;
             }
         } else if file.name().ends_with(".delete") {
-            let file_to_delete = outpath.with_extension("");
+            let file_to_delete = out_path.with_extension("");
             if file_to_delete.exists() {
                 if let Err(e) = fs::remove_file(&file_to_delete) {
                     eprintln!(
@@ -209,7 +224,7 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
                 }
             }
         } else {
-            if let Some(parent) = outpath.parent() {
+            if let Some(parent) = out_path.parent() {
                 if !parent.exists() {
                     if let Err(e) = fs::create_dir_all(parent) {
                         eprintln!(
@@ -221,12 +236,12 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
                     }
                 }
             }
-            let mut outfile = match File::create(&outpath) {
+            let mut outfile = match File::create(&out_path) {
                 Ok(file) => file,
                 Err(e) => {
                     eprintln!(
                         "\x1b[31mError creating file {}: {}. Skipping.\x1b[37m",
-                        outpath.display(),
+                        out_path.display(),
                         e
                     );
                     continue;
@@ -235,7 +250,7 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
             if let Err(e) = io::copy(&mut file, &mut outfile) {
                 eprintln!(
                     "\x1b[31mError writing to file {}: {}. Skipping.\x1b[37m",
-                    outpath.display(),
+                    out_path.display(),
                     e
                 );
                 continue;
@@ -259,7 +274,7 @@ fn cleanup() {
 fn wait_for_key_press() {
     println!("\nPress any key to exit...");
     let mut buffer = [0u8; 1];
-    std::io::stdin().read_exact(&mut buffer).unwrap();
+    io::stdin().read_exact(&mut buffer).unwrap();
 }
 
 fn main() {
@@ -270,12 +285,7 @@ fn main() {
     let version_file_path = Path::new("version.json");
 
     goldberg_stmts! {
-        println!("{}", s!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  "));
-        println!("{}", s!(" |   \\| _ \\ __| /_\\ |  \\/  |_ _/ _ \\ "));
-        println!("{}", s!(" | |) |   / _| / _ \\| |\\/| || | (_) |"));
-        println!("{}", s!(" |___/|_|_\\___/_/ \\_\\_|  |_|___\\___/ "));
-        println!("{}", s!("                                     "));
-        println!("{}", s!(" DREAMIO: AI-Powered Adventures - Updater\n\x1b[37m"));
+        print_header();
 
         println!("{}", s!("Checking for running game process..."));
         let mut processes = sysinfo::System::new_all();
