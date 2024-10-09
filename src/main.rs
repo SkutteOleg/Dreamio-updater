@@ -100,11 +100,27 @@ fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
     let response = reqwest::blocking::get(url)?;
     let json: Value = response.json()?;
 
-    let update_url = json["updateUrl"].as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid updateUrl in JSON"))?
+    let update_url = json["latestUrl"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid latestUrl in JSON"))?
         .to_string();
 
     Ok(update_url)
+}
+
+fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let version_file_path = Path::new("version.json");
+    let version_content = fs::read_to_string(version_file_path)?;
+    let json: Value = serde_json::from_str(&version_content)?;
+
+    let version_code = json["versionCode"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid versionCode in JSON"))?
+        .to_string();
+
+    let update_url = format!("https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/{}.zip", version_code);
+
+    Ok((version_code, update_url))
 }
 
 fn apply_update(update_zip_path: &Path) -> io::Result<()> {
@@ -118,9 +134,13 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
     let total_files = archive.len();
 
     let pb = ProgressBar::new(total_files as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} files (ETA: {eta_precise})")
-        .progress_chars("=>-"));
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} files (ETA: {eta_precise})",
+            )
+            .progress_chars("=>-"),
+    );
 
     let current_exe = env::current_exe()?;
     let current_exe_name = current_exe.file_name().unwrap().to_str().unwrap();
@@ -131,7 +151,10 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
         let mut file = match archive.by_index(i) {
             Ok(file) => file,
             Err(e) => {
-                eprintln!("\x1b[31mError accessing file in archive: {}. Skipping.\x1b[37m", e);
+                eprintln!(
+                    "\x1b[31mError accessing file in archive: {}. Skipping.\x1b[37m",
+                    e
+                );
                 continue;
             }
         };
@@ -148,32 +171,52 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
 
         if file.name().ends_with('/') {
             if let Err(e) = fs::create_dir_all(&outpath) {
-                eprintln!("\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m", outpath.display(), e);
+                eprintln!(
+                    "\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m",
+                    outpath.display(),
+                    e
+                );
                 continue;
             }
         } else if file.name().ends_with(".patch") {
             let original_file = outpath.with_extension("");
             let mut patch_data = Vec::new();
             if let Err(e) = file.read_to_end(&mut patch_data) {
-                eprintln!("\x1b[31mError reading patch data for {}: {}. Skipping.\x1b[37m", original_file.display(), e);
+                eprintln!(
+                    "\x1b[31mError reading patch data for {}: {}. Skipping.\x1b[37m",
+                    original_file.display(),
+                    e
+                );
                 continue;
             }
             if let Err(e) = apply_patch(&original_file, &patch_data, &original_file) {
-                eprintln!("\x1b[31mError applying patch to {}: {}. Skipping.\x1b[37m", original_file.display(), e);
+                eprintln!(
+                    "\x1b[31mError applying patch to {}: {}. Skipping.\x1b[37m",
+                    original_file.display(),
+                    e
+                );
                 continue;
             }
         } else if file.name().ends_with(".delete") {
             let file_to_delete = outpath.with_extension("");
             if file_to_delete.exists() {
                 if let Err(e) = fs::remove_file(&file_to_delete) {
-                    eprintln!("\x1b[31mError deleting file {}: {}. Skipping.\x1b[37m", file_to_delete.display(), e);
+                    eprintln!(
+                        "\x1b[31mError deleting file {}: {}. Skipping.\x1b[37m",
+                        file_to_delete.display(),
+                        e
+                    );
                 }
             }
         } else {
             if let Some(parent) = outpath.parent() {
                 if !parent.exists() {
                     if let Err(e) = fs::create_dir_all(parent) {
-                        eprintln!("\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m", parent.display(), e);
+                        eprintln!(
+                            "\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m",
+                            parent.display(),
+                            e
+                        );
                         continue;
                     }
                 }
@@ -181,12 +224,20 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
             let mut outfile = match File::create(&outpath) {
                 Ok(file) => file,
                 Err(e) => {
-                    eprintln!("\x1b[31mError creating file {}: {}. Skipping.\x1b[37m", outpath.display(), e);
+                    eprintln!(
+                        "\x1b[31mError creating file {}: {}. Skipping.\x1b[37m",
+                        outpath.display(),
+                        e
+                    );
                     continue;
                 }
             };
             if let Err(e) = io::copy(&mut file, &mut outfile) {
-                eprintln!("\x1b[31mError writing to file {}: {}. Skipping.\x1b[37m", outpath.display(), e);
+                eprintln!(
+                    "\x1b[31mError writing to file {}: {}. Skipping.\x1b[37m",
+                    outpath.display(),
+                    e
+                );
                 continue;
             }
         }
@@ -216,7 +267,7 @@ fn main() {
     set_window_title("DREAMIO: AI-Powered Adventures - Updater");
 
     let update_zip_path = PathBuf::from("update.zip");
-    let version_file_path = Path::new("version");
+    let version_file_path = Path::new("version.json");
 
     goldberg_stmts! {
         println!("{}", s!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  "));
@@ -258,70 +309,82 @@ fn main() {
             println!("{}", s!("No running game process found."));
         }
 
-        let latest_url = match get_latest_update_url() {
-            Ok(url) => url,
-            Err(e) => {
-                eprintln!("\x1b[31mFailed to get latest update URL: {}\x1b[37m", e);
-                wait_for_key_press();
-                exit(1);
-            }
-        };
-
         if !update_zip_path.exists() && !version_file_path.exists() {
             println!("{}", s!("Downloading latest update."));
 
-            match download_file(&latest_url, &update_zip_path) {
-                Ok(_) => {
-                    println!("Successfully downloaded latest update.");
-                    if let Err(e) = apply_update(&update_zip_path) {
-                        eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
-                        cleanup();
-                        wait_for_key_press();
-                        exit(1);
+            match get_latest_update_url() {
+                Ok(latest_url) => {
+                    match download_file(&latest_url, &update_zip_path) {
+                        Ok(_) => {
+                            println!("Successfully downloaded latest update.");
+                            if let Err(e) = apply_update(&update_zip_path) {
+                                eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
+                                cleanup();
+                                wait_for_key_press();
+                                exit(1);
+                            }
+                            cleanup();
+                        },
+                        Err(e) => {
+                            eprintln!("\x1b[31mError downloading latest update: {}\x1b[37m", e);
+                            wait_for_key_press();
+                            exit(1);
+                        }
                     }
-                    cleanup();
                 },
                 Err(e) => {
-                    eprintln!("\x1b[31mError downloading latest update: {}\x1b[37m", e);
+                    eprintln!("\x1b[31mFailed to get latest update URL: {}\x1b[37m", e);
                     wait_for_key_press();
                     exit(1);
                 }
             }
         } else if !update_zip_path.exists() && version_file_path.exists() {
             loop {
-                let version = fs::read_to_string(version_file_path).expect("Failed to read version file");
-                let version = version.trim();
+                match get_version_info() {
+                    Ok((version_code, update_url)) => {
+                        println!("Attempting to download update for version {}", version_code);
 
-                let download_url = format!("https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/{}.zip", version);
+                        match download_file(&update_url, &update_zip_path) {
+                            Ok(_) => {
+                                println!("Successfully downloaded update.");
+                                if let Err(e) = apply_update(&update_zip_path) {
+                                    eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
+                                    cleanup();
+                                    wait_for_key_press();
+                                    exit(1);
+                                }
+                                cleanup();
 
-                println!("Attempting to download update for version {}", version);
-
-                match download_file(&download_url, &update_zip_path) {
-                    Ok(_) => {
-                        println!("Successfully downloaded update.");
-                        if let Err(e) = apply_update(&update_zip_path) {
-                            eprintln!("\x1b[31mFailed to apply update: {}\x1b[37m", e);
-                            cleanup();
-                            wait_for_key_press();
-                            exit(1);
-                        }
-                        cleanup();
-
-                        let new_version = fs::read_to_string(version_file_path).expect("Failed to read updated version file");
-                        if new_version.trim() == version {
-                            println!("Update complete. No more updates available.");
-                            break;
+                                match get_version_info() {
+                                    Ok((new_version_code, _)) => {
+                                        if new_version_code == version_code {
+                                            println!("Update complete. No more updates available.");
+                                            break;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        eprintln!("\x1b[31mFailed to read updated version info: {}\x1b[37m", e);
+                                        wait_for_key_press();
+                                        exit(1);
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                if e.to_string().contains("404") {
+                                    println!("No more updates available.");
+                                    break;
+                                } else {
+                                    eprintln!("\x1b[31mError downloading update: {}\x1b[37m", e);
+                                    wait_for_key_press();
+                                    exit(1);
+                                }
+                            }
                         }
                     },
                     Err(e) => {
-                        if e.to_string().contains("404") {
-                            println!("No more updates available.");
-                            break;
-                        } else {
-                            eprintln!("\x1b[31mError downloading update: {}\x1b[37m", e);
-                            wait_for_key_press();
-                            exit(1);
-                        }
+                        eprintln!("\x1b[31mFailed to read version info: {}\x1b[37m", e);
+                        wait_for_key_press();
+                        exit(1);
                     }
                 }
             }
@@ -341,9 +404,9 @@ fn main() {
             cleanup();
         }
 
-        println!("{}", s!("Restarting the game..."));
+        println!("{}", s!("Launching the game..."));
         match Command::new("Dreamio.exe").spawn() {
-            Ok(_) => println!("{}", s!("Game restarted successfully.")),
+            Ok(_) => println!("{}", s!("Game launched successfully.")),
             Err(e) => eprintln!("{}", format!("\x1b[31mFailed to restart the game: {}\x1b[37m", e)),
         }
 
