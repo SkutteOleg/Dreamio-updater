@@ -116,7 +116,14 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
     for i in 0..total_files {
         pb.set_position(i as u64 + 1);
 
-        let mut file = archive.by_index(i)?;
+        let mut file = match archive.by_index(i) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("\x1b[31mError accessing file in archive: {}. Skipping.\x1b[37m", e);
+                continue;
+            }
+        };
+
         let outpath = PathBuf::from(file.name());
 
         if outpath
@@ -128,25 +135,48 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
         }
 
         if file.name().ends_with('/') {
-            fs::create_dir_all(&outpath)?;
+            if let Err(e) = fs::create_dir_all(&outpath) {
+                eprintln!("\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m", outpath.display(), e);
+                continue;
+            }
         } else if file.name().ends_with(".patch") {
             let original_file = outpath.with_extension("");
             let mut patch_data = Vec::new();
-            file.read_to_end(&mut patch_data)?;
-            apply_patch(&original_file, &patch_data, &original_file)?;
+            if let Err(e) = file.read_to_end(&mut patch_data) {
+                eprintln!("\x1b[31mError reading patch data for {}: {}. Skipping.\x1b[37m", original_file.display(), e);
+                continue;
+            }
+            if let Err(e) = apply_patch(&original_file, &patch_data, &original_file) {
+                eprintln!("\x1b[31mError applying patch to {}: {}. Skipping.\x1b[37m", original_file.display(), e);
+                continue;
+            }
         } else if file.name().ends_with(".delete") {
             let file_to_delete = outpath.with_extension("");
             if file_to_delete.exists() {
-                fs::remove_file(&file_to_delete)?;
+                if let Err(e) = fs::remove_file(&file_to_delete) {
+                    eprintln!("\x1b[31mError deleting file {}: {}. Skipping.\x1b[37m", file_to_delete.display(), e);
+                }
             }
         } else {
             if let Some(parent) = outpath.parent() {
                 if !parent.exists() {
-                    fs::create_dir_all(parent)?;
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        eprintln!("\x1b[31mError creating directory {}: {}. Skipping.\x1b[37m", parent.display(), e);
+                        continue;
+                    }
                 }
             }
-            let mut outfile = File::create(&outpath)?;
-            io::copy(&mut file, &mut outfile)?;
+            let mut outfile = match File::create(&outpath) {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("\x1b[31mError creating file {}: {}. Skipping.\x1b[37m", outpath.display(), e);
+                    continue;
+                }
+            };
+            if let Err(e) = io::copy(&mut file, &mut outfile) {
+                eprintln!("\x1b[31mError writing to file {}: {}. Skipping.\x1b[37m", outpath.display(), e);
+                continue;
+            }
         }
     }
 
