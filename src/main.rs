@@ -137,7 +137,7 @@ fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
         .to_string();
 
     let update_url = format!(
-        "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/{}.zip",
+        "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/patches/{}.zip",
         version_code
     );
 
