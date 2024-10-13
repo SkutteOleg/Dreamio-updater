@@ -114,7 +114,7 @@ fn download_and_apply_update(
 }
 
 fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
-    let url = "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/version.json";
+    let url = "https://dreamio.xyz/downloads/Builds/Windows/version.json";
     let response = reqwest::blocking::get(url)?;
     let json: Value = response.json()?;
 
@@ -137,7 +137,7 @@ fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
         .to_string();
 
     let update_url = format!(
-        "https://games.skutteoleg.com/dreamio/downloads/Builds/Windows/patches/{}.zip",
+        "https://dreamio.xyz/downloads/Builds/Windows/patches/{}.zip",
         version_code
     );
 
