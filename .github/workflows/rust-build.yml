@@ -1,0 +1,74 @@
+name: Rust Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+          override: true
+      - uses: extractions/setup-just@v2
+      - uses: crazy-max/ghaction-upx@v3
+        with:
+          install-only: true
+      - name: Build
+        run: just build
+
+      - name: Calculate SHA256
+        id: sha256
+        run: |
+          $hash = (Get-FileHash -Path .\target\x86_64-pc-windows-msvc\release\DreamioUpdater.exe -Algorithm SHA256).Hash.ToLower()
+          echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Get current date and short hash
+        id: date_hash
+        run: |
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $shortHash = "${{ github.sha }}".Substring(0, 7)
+          echo "DATE=$date" >> $env:GITHUB_OUTPUT
+          echo "SHORT_HASH=$shortHash" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: DreamioUpdater
+          path: target/x86_64-pc-windows-msvc/release/DreamioUpdater.exe
+
+      - name: Create Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.date_hash.outputs.DATE }}-${{ steps.date_hash.outputs.SHORT_HASH }}
+          release_name: ${{ steps.date_hash.outputs.DATE }}-${{ steps.date_hash.outputs.SHORT_HASH }}
+          body: |
+            ### SHA256:
+            ${{ steps.sha256.outputs.SHA256 }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/x86_64-pc-windows-msvc/release/DreamioUpdater.exe
+          asset_name: DreamioUpdater.exe
+          asset_content_type: application/vnd.microsoft.portable-executable
