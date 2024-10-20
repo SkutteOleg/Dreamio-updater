@@ -27,11 +27,17 @@ jobs:
       - name: Build
         run: just build
 
+      - name: Create ZIP file
+        run: |
+          Compress-Archive -Path .\target\x86_64-pc-windows-msvc\release\DreamioUpdater.exe -DestinationPath .\DreamioUpdater.zip
+
       - name: Calculate SHA256
         id: sha256
         run: |
-          $hash = (Get-FileHash -Path .\target\x86_64-pc-windows-msvc\release\DreamioUpdater.exe -Algorithm SHA256).Hash.ToLower()
-          echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
+          $exeHash = (Get-FileHash -Path .\target\x86_64-pc-windows-msvc\release\DreamioUpdater.exe -Algorithm SHA256).Hash.ToLower()
+          $zipHash = (Get-FileHash -Path .\DreamioUpdater.zip -Algorithm SHA256).Hash.ToLower()
+          echo "EXE_SHA256=$exeHash" >> $env:GITHUB_OUTPUT
+          echo "ZIP_SHA256=$zipHash" >> $env:GITHUB_OUTPUT
 
       - name: Get current date and short hash
         id: date_hash
@@ -41,11 +47,13 @@ jobs:
           echo "DATE=$date" >> $env:GITHUB_OUTPUT
           echo "SHORT_HASH=$shortHash" >> $env:GITHUB_OUTPUT
 
-      - name: Upload Artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v3
         with:
           name: DreamioUpdater
-          path: target/x86_64-pc-windows-msvc/release/DreamioUpdater.exe
+          path: |
+            target/x86_64-pc-windows-msvc/release/DreamioUpdater.exe
+            DreamioUpdater.zip
 
       - name: Create Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
@@ -57,12 +65,14 @@ jobs:
           tag_name: ${{ steps.date_hash.outputs.DATE }}-${{ steps.date_hash.outputs.SHORT_HASH }}
           release_name: ${{ steps.date_hash.outputs.DATE }}-${{ steps.date_hash.outputs.SHORT_HASH }}
           body: |
-            ### SHA256:
-            ${{ steps.sha256.outputs.SHA256 }}
+            ### Executable SHA256:
+            ${{ steps.sha256.outputs.EXE_SHA256 }}
+            ### Archive SHA256:
+            ${{ steps.sha256.outputs.ZIP_SHA256 }}
           draft: false
           prerelease: false
 
-      - name: Upload Release Asset
+      - name: Upload Release Asset (EXE)
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: actions/upload-release-asset@v1
         env:
@@ -72,3 +82,14 @@ jobs:
           asset_path: ./target/x86_64-pc-windows-msvc/release/DreamioUpdater.exe
           asset_name: DreamioUpdater.exe
           asset_content_type: application/vnd.microsoft.portable-executable
+
+      - name: Upload Release Asset (ZIP)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./DreamioUpdater.zip
+          asset_name: DreamioUpdater.zip
+          asset_content_type: application/zip
