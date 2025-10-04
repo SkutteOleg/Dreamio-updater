@@ -1,3 +1,4 @@
+use goldberg::{goldberg_stmts, goldberg_string as s};
 use indicatif::{ProgressBar, ProgressStyle};
 use qbsdiff::Bspatch;
 use reqwest;
@@ -144,22 +145,25 @@ fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
 }
 
 fn print_header() {
-    println!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  ");
-    println!(" |   \\| _ \\ __| /_\\ |  \\/  |_ _/ _ \\ ");
-    println!(" | |) |   / _| / _ \\| |\\/| || | (_) |");
-    println!(" |___/|_|_\\___/_/ \\_\\_|  |_|___\\___/ ");
-    println!("                                     ");
-    println!(" DREAMIO: AI-Powered Adventures - Updater\n\x1b[37m");
+    println!("{}", s!("\x1b[36m  ___  ___ ___   _   __  __ ___ ___  "));
+    println!("{}", s!(" |   \\| _ \\ __| /_\\ |  \\/  |_ _/ _ \\ "));
+    println!("{}", s!(" | |) |   / _| / _ \\| |\\/| || | (_) |"));
+    println!("{}", s!(" |___/|_|_\\___/_/ \\_\\_|  |_|___\\___/ "));
+    println!("{}", s!("                                     "));
+    println!(
+        "{}",
+        s!(" DREAMIO: AI-Powered Adventures - Updater\n\x1b[37m")
+    );
 }
 
 fn apply_update(update_zip_path: &Path) -> io::Result<()> {
-    println!("Update file found. Preparing to extract...");
+    println!("{}", s!("Update file found. Preparing to extract..."));
 
     let update_zip_data = fs::read(update_zip_path)?;
     let reader = Cursor::new(update_zip_data);
     let mut archive = ZipArchive::new(reader)?;
 
-    println!("Applying update...");
+    println!("{}", s!("Applying update..."));
     let total_files = archive.len();
 
     let pb = ProgressBar::new(total_files as u64);
@@ -279,11 +283,11 @@ fn apply_update(update_zip_path: &Path) -> io::Result<()> {
 fn cleanup() {
     let update_zip_path = PathBuf::from("update.zip");
     if update_zip_path.exists() {
-        println!("Cleaning up temporary files...");
+        println!("{}", s!("Cleaning up temporary files..."));
         if let Err(e) = fs::remove_file(&update_zip_path) {
             eprintln!("\x1b[31mFailed to remove update.zip: {}\x1b[37m", e);
         }
-        println!("Cleanup completed.");
+        println!("{}", s!("Cleanup completed."));
     }
 }
 
@@ -300,100 +304,101 @@ fn main() {
     let update_zip_path = PathBuf::from("update.zip");
     let version_file_path = Path::new("version.json");
 
-    print_header();
+    goldberg_stmts! {
+        print_header();
 
-    println!("Checking for running game process...");
-    let mut processes = sysinfo::System::new_all();
-    processes.refresh_all();
+        println!("{}", s!("Checking for running game process..."));
+        let mut processes = sysinfo::System::new_all();
+        processes.refresh_all();
 
-    let mut process_to_kill = None;
-    for (pid, process) in processes.processes() {
-        if process.name() == "Dreamio.exe" {
-            println!("Game process found. Shutting down...");
+        let mut process_to_kill = None;
+        for (pid, process) in processes.processes() {
+            if process.name() == "Dreamio.exe" {
+                println!("{}", s!("Game process found. Shutting down..."));
 
-            if !process.kill() {
-                eprintln!("\x1b[31mError shutting down the game!\x1b[37m");
-                wait_for_key_press();
-                exit(1);
-            }
-            process_to_kill = Some(*pid);
-            break;
-        }
-    }
-
-    if let Some(pid_to_kill) = process_to_kill {
-        println!("Waiting for game process to fully terminate...");
-        let mut is_process_running = true;
-        while is_process_running {
-            thread::sleep(Duration::from_millis(100));
-            processes.refresh_processes();
-            is_process_running = processes.processes().iter().any(|(p, _)| *p == pid_to_kill);
-        }
-        println!("Game process terminated successfully.");
-    } else {
-        println!("No running game process found.");
-    }
-
-    if !update_zip_path.exists() && !version_file_path.exists() {
-        println!("Downloading latest update.");
-        match get_latest_update_url() {
-            Ok(latest_url) => {
-                if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path) {
-                    handle_error("Failed to download or apply update", &*e);
+                if !process.kill() {
+                    eprintln!("{}", s!("\x1b[31mError shutting down the game!\x1b[37m"));
+                    wait_for_key_press();
+                    exit(1);
                 }
+                process_to_kill = Some(*pid);
+                break;
             }
-            Err(e) => handle_error("Failed to get latest update URL", &*e),
         }
-    } else if !update_zip_path.exists() && version_file_path.exists() {
-        loop {
-            match get_version_info() {
-                Ok((version_code, update_url)) => {
-                    println!("Attempting to download update for version {}", version_code);
-                    match download_and_apply_update(&update_url, &update_zip_path) {
-                        Ok(_) => match get_version_info() {
-                            Ok((new_version_code, _)) => {
-                                if new_version_code == version_code {
-                                    println!("Update complete. No more updates available.");
+
+        if let Some(pid_to_kill) = process_to_kill {
+            println!("{}", s!("Waiting for game process to fully terminate..."));
+            let mut is_process_running = true;
+            while is_process_running {
+                thread::sleep(Duration::from_millis(100));
+                processes.refresh_processes();
+                is_process_running = processes.processes().iter().any(|(p, _)| *p == pid_to_kill);
+            }
+            println!("{}", s!("Game process terminated successfully."));
+        } else {
+            println!("{}", s!("No running game process found."));
+        }
+
+        if !update_zip_path.exists() && !version_file_path.exists() {
+            println!("{}", s!("Downloading latest update."));
+            match get_latest_update_url() {
+                Ok(latest_url) => {
+                    if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path) {
+                        handle_error("Failed to download or apply update", &*e);
+                    }
+                },
+                Err(e) => handle_error("Failed to get latest update URL", &*e),
+            }
+        } else if !update_zip_path.exists() && version_file_path.exists() {
+            loop {
+                match get_version_info() {
+                    Ok((version_code, update_url)) => {
+                        println!("Attempting to download update for version {}", version_code);
+                        match download_and_apply_update(&update_url, &update_zip_path) {
+                            Ok(_) => {
+                                match get_version_info() {
+                                    Ok((new_version_code, _)) => {
+                                        if new_version_code == version_code {
+                                            println!("Update complete. No more updates available.");
+                                            break;
+                                        }
+                                    },
+                                    Err(e) => handle_error("Failed to read updated version info", &*e),
+                                }
+                            },
+                            Err(e) => {
+                                if e.to_string().contains("404") {
+                                    println!("No more updates available.");
                                     break;
+                                } else {
+                                    handle_error("Error downloading update", &*e);
                                 }
                             }
-                            Err(e) => handle_error("Failed to read updated version info", &*e),
-                        },
-                        Err(e) => {
-                            if e.to_string().contains("404") {
-                                println!("No more updates available.");
-                                break;
-                            } else {
-                                handle_error("Error downloading update", &*e);
-                            }
                         }
-                    }
+                    },
+                    Err(e) => handle_error("Failed to read version info", &*e),
                 }
-                Err(e) => handle_error("Failed to read version info", &*e),
             }
+        } else if !update_zip_path.exists() {
+            handle_error(
+                "No update file (update.zip) found!",
+                &io::Error::new(io::ErrorKind::NotFound, "update.zip not found")
+            );
         }
-    } else if !update_zip_path.exists() {
-        handle_error(
-            "No update file (update.zip) found!",
-            &io::Error::new(io::ErrorKind::NotFound, "update.zip not found"),
-        );
-    }
 
-    if update_zip_path.exists() {
-        if let Err(e) = apply_update(&update_zip_path) {
-            handle_error("Failed to apply update", &e);
+        if update_zip_path.exists() {
+            if let Err(e) = apply_update(&update_zip_path) {
+                handle_error("Failed to apply update", &e);
+            }
+            cleanup();
         }
-        cleanup();
-    }
 
-    println!("Launching the game...");
-    match Command::new("Dreamio.exe").spawn() {
-        Ok(_) => println!("Game launched successfully."),
-        Err(e) => eprintln!(
-            "{}",
-            format!("\x1b[31mFailed to restart the game: {}\x1b[37m", e)
-        ),
-    }
+        println!("{}", s!("Launching the game..."));
+        match Command::new("Dreamio.exe").spawn() {
+            Ok(_) => println!("{}", s!("Game launched successfully.")),
+            Err(e) => eprintln!("{}", format!("\x1b[31mFailed to restart the game: {}\x1b[37m", e)),
+        }
 
-    println!("\x1b[32m\nUpdate process completed!\x1b[37m");
+        println!("{}", s!("\x1b[32m\nUpdate process completed!\x1b[37m"));
+    }
 }
