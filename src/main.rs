@@ -75,7 +75,7 @@ fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error
 
     let pb = ProgressBar::new(total_size);
     pb.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] [{bar:30.cyan/blue}] {bytes}/{total_bytes} (ETA: {eta_precise})")
+        .template("[{elapsed_precise}] [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta_precise})")
         .progress_chars("=>-"));
 
     let mut file = File::create(path)?;
