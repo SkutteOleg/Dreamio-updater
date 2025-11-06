@@ -11,14 +11,14 @@ use std::process::{exit, Command};
 use std::thread;
 use std::time::Duration;
 use sysinfo::{ProcessExt, SystemExt};
+use terminal_link::Link;
 use zip::ZipArchive;
 
 use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
 use winapi::um::handleapi::INVALID_HANDLE_VALUE;
 use winapi::um::processenv::GetStdHandle;
 use winapi::um::winbase::STD_OUTPUT_HANDLE;
-use winapi::um::wincon::SetConsoleTitleW;
-use winapi::um::wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+use winapi::um::wincon::{SetConsoleTitleW, ENABLE_VIRTUAL_TERMINAL_PROCESSING};
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -97,6 +97,13 @@ fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error
 
 fn handle_error(message: &str, error: &dyn std::error::Error) -> ! {
     eprintln!("\x1b[31m{}: {}\x1b[37m", message, error);
+    let url = "https://dreamio.xyz/downloads/Builds/Windows/latest.zip";
+    let link = Link::new(url, url);
+    eprintln!(
+        "\x1b[33mPlease download the latest game archive manually: {}\x1b[37m",
+        link
+    );
+    eprintln!("\x1b[33m(Ctrl+Click the link to open)\x1b[37m");
     cleanup();
     wait_for_key_press();
     exit(1);
