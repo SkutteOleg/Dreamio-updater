@@ -113,7 +113,11 @@ fn download_and_apply_update(
     url: &str,
     update_zip_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    download_file(url, update_zip_path)?;
+    if download_file(url, update_zip_path).is_err() {
+        println!("HTTPS download failed. Retrying with HTTP.");
+        let http_url = url.replace("https", "http");
+        download_file(&http_url, update_zip_path)?;
+    }
     println!("Successfully downloaded update.");
     apply_update(update_zip_path)?;
     cleanup();
@@ -122,7 +126,14 @@ fn download_and_apply_update(
 
 fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://dreamio.xyz/downloads/Builds/Windows/version.json";
-    let response = reqwest::blocking::get(url)?;
+    let response = match reqwest::blocking::get(url) {
+        Ok(res) => res,
+        Err(_) => {
+            println!("HTTPS request failed. Retrying with HTTP.");
+            let http_url = url.replace("https", "http");
+            reqwest::blocking::get(&http_url)?
+        }
+    };
     let json: Value = response.json()?;
 
     let update_url = json["latestUrl"]
