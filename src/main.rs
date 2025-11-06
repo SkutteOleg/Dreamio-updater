@@ -346,58 +346,55 @@ fn main() {
             println!("{}", s!("No running game process found."));
         }
 
-        if !update_zip_path.exists() && !version_file_path.exists() {
+        if update_zip_path.exists() {
+            if let Err(e) = apply_update(&update_zip_path) {
+                handle_error("Failed to apply update", &e);
+            }
+            cleanup();
+        }
+
+        if !version_file_path.exists() {
             println!("{}", s!("Downloading latest update."));
             match get_latest_update_url() {
                 Ok(latest_url) => {
                     if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path) {
                         handle_error("Failed to download or apply update", &*e);
                     }
-                },
+                }
                 Err(e) => handle_error("Failed to get latest update URL", &*e),
             }
-        } else if !update_zip_path.exists() && version_file_path.exists() {
-            loop {
-                match get_version_info() {
-                    Ok((version_code, update_url)) => {
-                        println!("Attempting to download update for version {}", version_code);
-                        match download_and_apply_update(&update_url, &update_zip_path) {
-                            Ok(_) => {
-                                match get_version_info() {
-                                    Ok((new_version_code, _)) => {
-                                        if new_version_code == version_code {
-                                            println!("Update complete. No more updates available.");
-                                            break;
-                                        }
-                                    },
-                                    Err(e) => handle_error("Failed to read updated version info", &*e),
+        }
+
+        loop {
+            match get_version_info() {
+                Ok((version_code, update_url)) => {
+                    println!("Attempting to download update for version {}", version_code);
+                    match download_and_apply_update(&update_url, &update_zip_path) {
+                        Ok(_) => {
+                            match get_version_info() {
+                                Ok((new_version_code, _)) => {
+                                    if new_version_code == version_code {
+                                        println!("Update complete. No more updates available.");
+                                        break;
+                                    }
                                 }
-                            },
-                            Err(e) => {
-                                if e.to_string().contains("404") {
-                                    println!("No more updates available.");
-                                    break;
-                                } else {
-                                    handle_error("Error downloading update", &*e);
+                                Err(e) => {
+                                    handle_error("Failed to read updated version info", &*e)
                                 }
                             }
                         }
-                    },
-                    Err(e) => handle_error("Failed to read version info", &*e),
+                        Err(e) => {
+                            if e.to_string().contains("404") {
+                                println!("No more updates available.");
+                                break;
+                            } else {
+                                handle_error("Error downloading update", &*e);
+                            }
+                        }
+                    }
                 }
+                Err(e) => handle_error("Failed to read version info", &*e),
             }
-        } else if !update_zip_path.exists() {
-            handle_error(
-                "No update file (update.zip) found!",
-                &io::Error::new(io::ErrorKind::NotFound, "update.zip not found")
-            );
-        }
-
-        if update_zip_path.exists() {
-            if let Err(e) = apply_update(&update_zip_path) {
-                handle_error("Failed to apply update", &e);
-            }
-            cleanup();
         }
 
         println!("{}", s!("Launching the game..."));
