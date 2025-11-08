@@ -15,6 +15,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use reqwest::Version;
 use sysinfo::{ProcessExt, System, SystemExt};
 use windows::{
     Win32::Foundation::HWND,
@@ -454,9 +455,11 @@ async fn update_task(sender: Sender<UpdateMessage>) {
         sender
             .send(UpdateMessage::Log("Downloading the game...".to_string()))
             .unwrap();
-        match get_latest_update_url() {
+        match get_latest_update_url().await {
             Ok(latest_url) => {
-                if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path, &sender) {
+                if let Err(e) =
+                    download_and_apply_update(&latest_url, &update_zip_path, &sender).await
+                {
                     sender
                         .send(UpdateMessage::Error(format!(
                             "Failed to download or apply update: {}",
@@ -491,7 +494,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                         version_code
                     )))
                     .unwrap();
-                match download_and_apply_update(&update_url, &update_zip_path, &sender) {
+                match download_and_apply_update(&update_url, &update_zip_path, &sender).await {
                     Ok(_) => {
                         match get_version_info() {
                             Ok((new_version_code, _)) => {
@@ -575,15 +578,16 @@ fn apply_patch(old_file: &Path, patch_data: &[u8], new_file: &Path) -> io::Resul
     Ok(())
 }
 
-fn download_file(
+async fn download_file(
     url: &str,
     path: &Path,
     sender: &Sender<UpdateMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
+    let client = reqwest::Client::builder()
+        .http3_prior_knowledge()
+        .http3_send_grease(true)
         .build()?;
-    let mut response = client.get(url).send()?;
+    let mut response = client.get(url).version(if url.starts_with("https") { Version::HTTP_3 } else { Version::default() }).send().await?;
 
     if !response.status().is_success() {
         return Err(Box::new(io::Error::new(
@@ -595,21 +599,11 @@ fn download_file(
     let total_size = response.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
     let mut file = File::create(path)?;
-    let mut buffer = [0; 8192];
     let start_time = Instant::now();
 
-    loop {
-        let n = match response.read(&mut buffer) {
-            Ok(n) => n,
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        if n == 0 {
-            break;
-        }
-
-        file.write_all(&buffer[..n])?;
-        downloaded += n as u64;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all(&chunk)?;
+        downloaded += chunk.len() as u64;
 
         let elapsed = start_time.elapsed();
         let bytes_per_sec = if elapsed.as_secs() > 0 {
@@ -639,7 +633,7 @@ fn download_file(
     Ok(())
 }
 
-fn download_and_apply_update(
+async fn download_and_apply_update(
     url: &str,
     update_zip_path: &Path,
     sender: &Sender<UpdateMessage>,
@@ -647,7 +641,7 @@ fn download_and_apply_update(
     sender
         .send(UpdateMessage::Status("Downloading update...".to_string()))
         .unwrap();
-    if let Err(e) = download_file(url, update_zip_path, sender) {
+    if let Err(e) = download_file(url, update_zip_path, sender).await {
         if url.starts_with("https://") {
             let http_url = url.replace("https", "http");
             sender
@@ -655,7 +649,7 @@ fn download_and_apply_update(
                     "HTTPS download failed, trying HTTP...".to_string(),
                 ))
                 .unwrap();
-            download_file(&http_url, update_zip_path, sender)?;
+            download_file(&http_url, update_zip_path, sender).await?;
         } else {
             return Err(e);
         }
@@ -665,21 +659,22 @@ fn download_and_apply_update(
     Ok(())
 }
 
-fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
+async fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://dreamio.xyz/downloads/Builds/Windows/version.json";
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
+    let client = reqwest::Client::builder()
+        .http3_prior_knowledge()
+        .http3_send_grease(true)
         .build()?;
 
-    let response = match client.get(url).send() {
+    let response = match client.get(url).version(Version::HTTP_3).send().await {
         Ok(res) => res,
         Err(_) => {
             let http_url = url.replace("https", "http");
-            client.get(&http_url).send()?
+            client.get(&http_url).send().await?
         }
     };
 
-    let json: Value = response.json()?;
+    let json: Value = response.json().await?;
     let update_url = json["latestUrl"]
         .as_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid latestUrl in JSON"))?
