@@ -768,7 +768,18 @@ fn apply_update(update_zip_path: &Path, sender: &Sender<UpdateMessage>) -> io::R
     let current_exe_name = current_exe.file_name().unwrap().to_str().unwrap();
 
     for i in 0..archive_len {
-        let mut file = archive.by_index(i)?;
+        let mut file = match archive.by_index(i) {
+            Ok(file) => file,
+            Err(e) => {
+                sender
+                    .send(UpdateMessage::Error(
+                        format!("Error accessing file in archive: {}. Skipping.", e),
+                        None,
+                    ))
+                    .unwrap();
+                continue;
+            }
+        };
         let out_path = PathBuf::from(file.name());
 
         if out_path
@@ -780,25 +791,103 @@ fn apply_update(update_zip_path: &Path, sender: &Sender<UpdateMessage>) -> io::R
         }
 
         if file.name().ends_with('/') {
-            fs::create_dir_all(&out_path)?;
+            if let Err(e) = fs::create_dir_all(&out_path) {
+                sender
+                    .send(UpdateMessage::Error(
+                        format!(
+                            "Error creating directory {}: {}. Skipping.",
+                            out_path.display(),
+                            e
+                        ),
+                        None,
+                    ))
+                    .unwrap();
+                continue;
+            }
         } else if file.name().ends_with(".patch") {
             let original_file = out_path.with_extension("");
             let mut patch_data = Vec::new();
-            file.read_to_end(&mut patch_data)?;
-            apply_patch(&original_file, &patch_data, &original_file)?;
+            if let Err(e) = file.read_to_end(&mut patch_data) {
+                sender
+                    .send(UpdateMessage::Error(
+                        format!(
+                            "Error reading patch data for {}: {}. Skipping.",
+                            original_file.display(),
+                            e
+                        ),
+                        None,
+                    ))
+                    .unwrap();
+                continue;
+            }
+            if let Err(e) = apply_patch(&original_file, &patch_data, &original_file) {
+                sender
+                    .send(UpdateMessage::Error(
+                        format!(
+                            "Error applying patch to {}: {}. Skipping.",
+                            original_file.display(),
+                            e
+                        ),
+                        None,
+                    ))
+                    .unwrap();
+                continue;
+            }
         } else if file.name().ends_with(".delete") {
             let file_to_delete = out_path.with_extension("");
             if file_to_delete.exists() {
-                fs::remove_file(&file_to_delete)?;
+                if let Err(e) = fs::remove_file(&file_to_delete) {
+                    sender
+                        .send(UpdateMessage::Error(
+                            format!(
+                                "Error deleting file {}: {}. Skipping.",
+                                file_to_delete.display(),
+                                e
+                            ),
+                            None,
+                        ))
+                        .unwrap();
+                }
             }
         } else {
             if let Some(parent) = out_path.parent() {
                 if !parent.exists() {
-                    fs::create_dir_all(parent)?;
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        sender
+                            .send(UpdateMessage::Error(
+                                format!(
+                                    "Error creating directory {}: {}. Skipping.",
+                                    parent.display(),
+                                    e
+                                ),
+                                None,
+                            ))
+                            .unwrap();
+                        continue;
+                    }
                 }
             }
-            let mut outfile = File::create(&out_path)?;
-            io::copy(&mut file, &mut outfile)?;
+            let mut outfile = match File::create(&out_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    sender
+                        .send(UpdateMessage::Error(
+                            format!("Error creating file {}: {}. Skipping.", out_path.display(), e),
+                            None,
+                        ))
+                        .unwrap();
+                    continue;
+                }
+            };
+            if let Err(e) = io::copy(&mut file, &mut outfile) {
+                sender
+                    .send(UpdateMessage::Error(
+                        format!("Error writing to file {}: {}. Skipping.", out_path.display(), e),
+                        None,
+                    ))
+                    .unwrap();
+                continue;
+            }
         }
         let progress_text = format!(
             "Applying file {}/{}: {}",
