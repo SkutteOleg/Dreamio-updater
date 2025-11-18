@@ -15,6 +15,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use reqwest::Version;
 use sysinfo::{ProcessExt, System, SystemExt};
 use windows::{
     Win32::Foundation::HWND,
@@ -88,7 +89,7 @@ pub struct ProgressUpdate {
 
 pub enum UpdateMessage {
     Log(String),
-    Error(String, Option<String>),
+    Error(String),
     Status(String),
     Progress(f32),
     ProgressUpdate(ProgressUpdate),
@@ -117,7 +118,6 @@ pub struct UpdateGUI {
     applying_progress: String,
     exit_code: i32,
     update_failed: bool,
-    last_error_response: Option<String>,
     shared_state: Arc<Mutex<SharedState>>,
     image: Option<ColorImage>,
     texture: Option<egui::TextureHandle>,
@@ -151,7 +151,6 @@ impl UpdateGUI {
             applying_progress: "".to_string(),
             exit_code: 1,
             update_failed: false,
-            last_error_response: None,
             shared_state,
             image: Some(color_image),
             texture: None,
@@ -226,12 +225,11 @@ impl App for UpdateGUI {
                     message: log,
                     is_error: false,
                 }),
-                UpdateMessage::Error(log, response) => {
+                UpdateMessage::Error(log) => {
                     self.logs.push(LogEntry {
                         message: log,
                         is_error: true,
                     });
-                    self.last_error_response = response;
                     if let (Some(taskbar), Some(hwnd)) = (&self.taskbar, self.window_handle) {
                         taskbar.set_progress_state(hwnd, ProgressState::Error);
                     }
@@ -346,29 +344,10 @@ impl App for UpdateGUI {
             if self.update_failed {
                 ui.separator();
 
-                if self.last_error_response.is_some() {
-                    ui.heading("A security appliance or firewall might be blocking the request. Please check your firewall software, for instance Xfinity Advanced Security.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Retry").clicked() {
-                            self.retry();
-                        }
-                        if ui.button("More details").clicked() {
-                            if let Some(response) = &self.last_error_response {
-                                let path = std::env::temp_dir().join("dreamio-updater-error.html");
-                                if let Ok(mut file) = std::fs::File::create(&path) {
-                                    if file.write_all(response.as_bytes()).is_ok() {
-                                        opener::open(path).ok();
-                                    }
-                                }
-                            }
-                        }
-                    });
-                } else {
-                    ui.heading("Please try again. If the issue persists, you can download the latest version of the game manually:");
-                    ui.hyperlink("https://dreamio.xyz/downloads/Builds/Windows/latest.zip");
-                    if ui.button("Retry").clicked() {
-                        self.retry();
-                    }
+                ui.heading("Please try again. If the issue persists, you can download the latest version of the game manually:");
+                ui.hyperlink("https://dreamio.xyz/downloads/Builds/Windows/latest.zip");
+                if ui.button("Retry").clicked() {
+                    self.retry();
                 }
             }
         });
@@ -420,10 +399,10 @@ async fn update_task(sender: Sender<UpdateMessage>) {
             if let Some(process) = system.process(*pid) {
                 if !process.kill() {
                     sender
-                        .send(UpdateMessage::Error(
-                            format!("Failed to send kill signal to process {}", pid),
-                            None,
-                        ))
+                        .send(UpdateMessage::Error(format!(
+                            "Failed to send kill signal to process {}",
+                            pid
+                        )))
                         .unwrap();
                 }
             }
@@ -460,10 +439,10 @@ async fn update_task(sender: Sender<UpdateMessage>) {
     if update_zip_path.exists() {
         if let Err(e) = apply_update(&update_zip_path, &sender) {
             sender
-                .send(UpdateMessage::Error(
-                    format!("Failed to apply update: {}", e),
-                    None,
-                ))
+                .send(UpdateMessage::Error(format!(
+                    "Failed to apply update: {}",
+                    e
+                )))
                 .unwrap();
             sender.send(UpdateMessage::UpdateFailed).unwrap();
             cleanup();
@@ -476,14 +455,16 @@ async fn update_task(sender: Sender<UpdateMessage>) {
         sender
             .send(UpdateMessage::Log("Downloading the game...".to_string()))
             .unwrap();
-        match get_latest_update_url() {
+        match get_latest_update_url().await {
             Ok(latest_url) => {
-                if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path, &sender) {
+                if let Err(e) =
+                    download_and_apply_update(&latest_url, &update_zip_path, &sender).await
+                {
                     sender
-                        .send(UpdateMessage::Error(
-                            format!("Failed to download or apply update: {}", e),
-                            None,
-                        ))
+                        .send(UpdateMessage::Error(format!(
+                            "Failed to download or apply update: {}",
+                            e
+                        )))
                         .unwrap();
                     sender.send(UpdateMessage::UpdateFailed).unwrap();
                     cleanup();
@@ -491,26 +472,12 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                 }
             }
             Err(e) => {
-                let error_string = e.to_string();
-                if error_string.contains("Received an HTML response") {
-                    let response_body = error_string
-                        .splitn(2, "Response:")
-                        .nth(1)
-                        .map(|s| s.trim().to_string());
-                    sender
-                        .send(UpdateMessage::Error(
-                            "Failed to get latest update URL: Received an HTML response instead of JSON. A security appliance or firewall might be blocking the request. Please check your firewall software, for instance Xfinity Advanced Security.".to_string(),
-                            response_body,
-                        ))
-                        .unwrap();
-                } else {
-                    sender
-                        .send(UpdateMessage::Error(
-                            format!("Failed to get latest update URL: {}", e),
-                            None,
-                        ))
-                        .unwrap();
-                }
+                sender
+                    .send(UpdateMessage::Error(format!(
+                        "Failed to get latest update URL: {}",
+                        e
+                    )))
+                    .unwrap();
                 sender.send(UpdateMessage::UpdateFailed).unwrap();
                 cleanup();
                 return;
@@ -527,7 +494,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                         version_code
                     )))
                     .unwrap();
-                match download_and_apply_update(&update_url, &update_zip_path, &sender) {
+                match download_and_apply_update(&update_url, &update_zip_path, &sender).await {
                     Ok(_) => {
                         match get_version_info() {
                             Ok((new_version_code, _)) => {
@@ -543,10 +510,10 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                             }
                             Err(e) => {
                                 sender
-                                    .send(UpdateMessage::Error(
-                                        format!("Failed to read updated version info: {}", e),
-                                        None,
-                                    ))
+                                    .send(UpdateMessage::Error(format!(
+                                        "Failed to read updated version info: {}",
+                                        e
+                                    )))
                                     .unwrap();
                                 sender.send(UpdateMessage::UpdateFailed).unwrap();
                                 cleanup();
@@ -564,10 +531,10 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                             break;
                         } else {
                             sender
-                                .send(UpdateMessage::Error(
-                                    format!("Error downloading update: {}", e),
-                                    None,
-                                ))
+                                .send(UpdateMessage::Error(format!(
+                                    "Error downloading update: {}",
+                                    e
+                                )))
                                 .unwrap();
                             sender.send(UpdateMessage::UpdateFailed).unwrap();
                             cleanup();
@@ -578,10 +545,10 @@ async fn update_task(sender: Sender<UpdateMessage>) {
             }
             Err(e) => {
                 sender
-                    .send(UpdateMessage::Error(
-                        format!("Failed to read version info: {}", e),
-                        None,
-                    ))
+                    .send(UpdateMessage::Error(format!(
+                        "Failed to read version info: {}",
+                        e
+                    )))
                     .unwrap();
                 sender.send(UpdateMessage::UpdateFailed).unwrap();
                 cleanup();
@@ -611,16 +578,16 @@ fn apply_patch(old_file: &Path, patch_data: &[u8], new_file: &Path) -> io::Resul
     Ok(())
 }
 
-fn download_file(
+async fn download_file(
     url: &str,
     path: &Path,
     sender: &Sender<UpdateMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("DreamioUpdater/1.0")
-        .timeout(Duration::from_secs(30))
+    let client = reqwest::Client::builder()
+        .http3_prior_knowledge()
+        .http3_send_grease(true)
         .build()?;
-    let mut response = client.get(url).send()?;
+    let mut response = client.get(url).version(if url.starts_with("https") { Version::HTTP_3 } else { Version::default() }).send().await?;
 
     if !response.status().is_success() {
         return Err(Box::new(io::Error::new(
@@ -632,21 +599,11 @@ fn download_file(
     let total_size = response.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
     let mut file = File::create(path)?;
-    let mut buffer = [0; 8192];
     let start_time = Instant::now();
 
-    loop {
-        let n = match response.read(&mut buffer) {
-            Ok(n) => n,
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        if n == 0 {
-            break;
-        }
-
-        file.write_all(&buffer[..n])?;
-        downloaded += n as u64;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all(&chunk)?;
+        downloaded += chunk.len() as u64;
 
         let elapsed = start_time.elapsed();
         let bytes_per_sec = if elapsed.as_secs() > 0 {
@@ -676,7 +633,7 @@ fn download_file(
     Ok(())
 }
 
-fn download_and_apply_update(
+async fn download_and_apply_update(
     url: &str,
     update_zip_path: &Path,
     sender: &Sender<UpdateMessage>,
@@ -684,7 +641,7 @@ fn download_and_apply_update(
     sender
         .send(UpdateMessage::Status("Downloading update...".to_string()))
         .unwrap();
-    if let Err(e) = download_file(url, update_zip_path, sender) {
+    if let Err(e) = download_file(url, update_zip_path, sender).await {
         if url.starts_with("https://") {
             let http_url = url.replace("https", "http");
             sender
@@ -692,7 +649,7 @@ fn download_and_apply_update(
                     "HTTPS download failed, trying HTTP...".to_string(),
                 ))
                 .unwrap();
-            download_file(&http_url, update_zip_path, sender)?;
+            download_file(&http_url, update_zip_path, sender).await?;
         } else {
             return Err(e);
         }
@@ -702,33 +659,22 @@ fn download_and_apply_update(
     Ok(())
 }
 
-fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
+async fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://dreamio.xyz/downloads/Builds/Windows/version.json";
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("DreamioUpdater/1.0")
-        .timeout(Duration::from_secs(30))
+    let client = reqwest::Client::builder()
+        .http3_prior_knowledge()
+        .http3_send_grease(true)
         .build()?;
 
-    let response = match client.get(url).send() {
+    let response = match client.get(url).version(Version::HTTP_3).send().await {
         Ok(res) => res,
         Err(_) => {
             let http_url = url.replace("https", "http");
-            client.get(&http_url).send()?
+            client.get(&http_url).send().await?
         }
     };
 
-    let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).cloned();
-    let response_text = response.text()?;
-
-    if let Some(content_type) = content_type {
-        if let Ok(content_type) = content_type.to_str() {
-            if content_type.contains("text/html") {
-                return Err(format!("Received an HTML response instead of JSON. A security appliance or firewall might be blocking the request. Please check your firewall software, for instance Xfinity Advanced Security. Response: {}", response_text).into());
-            }
-        }
-    }
-
-    let json: Value = serde_json::from_str(&response_text)?;
+    let json: Value = response.json().await?;
     let update_url = json["latestUrl"]
         .as_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid latestUrl in JSON"))?
@@ -944,7 +890,7 @@ fn format_bytes(bytes: u64) -> String {
 fn main() {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([272.0, 500.0])
+            .with_inner_size([272.0, 400.0])
             .with_min_inner_size([272.0, 294.0])
             .with_icon(load_icon()),
         run_and_return: true,
