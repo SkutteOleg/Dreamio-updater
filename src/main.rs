@@ -365,7 +365,7 @@ impl App for UpdateGUI {
                     });
                 } else {
                     ui.heading("Please try again. If the issue persists, you can download the latest version of the game manually:");
-                    ui.hyperlink("https://dreamio.xyz/downloads/Builds/Windows/latest.zip");
+                    ui.hyperlink("https://storage.googleapis.com/dreamio/downloads/Builds/Windows/latest.zip");
                     if ui.button("Retry").clicked() {
                         self.retry();
                     }
@@ -703,7 +703,7 @@ fn download_and_apply_update(
 }
 
 fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
-    let url = "https://dreamio.xyz/downloads/Builds/Windows/version.json";
+    let url = "https://storage.googleapis.com/dreamio/downloads/Builds/Windows/version.json";
     let client = reqwest::blocking::Client::builder()
         .user_agent("DreamioUpdater/1.0")
         .timeout(Duration::from_secs(30))
@@ -748,7 +748,7 @@ fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
         .to_string();
 
     let update_url = format!(
-        "https://dreamio.xyz/downloads/Builds/Windows/patches/{}.zip",
+        "https://storage.googleapis.com/dreamio/downloads/Builds/Windows/patches/{}.zip",
         version_code
     );
 
