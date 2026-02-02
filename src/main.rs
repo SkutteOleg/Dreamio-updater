@@ -16,12 +16,22 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use sysinfo::{ProcessExt, System, SystemExt};
+use rfd::FileDialog;
 use windows::{
+    core::{ComInterface, PCWSTR, HSTRING},
     Win32::Foundation::HWND,
     Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
     },
-    Win32::UI::Shell::{ITaskbarList3, TaskbarList, TBPFLAG},
+    Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    },
+    Win32::UI::Shell::{
+        FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_Programs, SHGetKnownFolderPath,
+        IShellLinkW, ITaskbarList3, ShellLink, TaskbarList, KF_FLAG_DEFAULT, TBPFLAG,
+    },
     Win32::UI::WindowsAndMessaging::{
         FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG,
     },
@@ -102,6 +112,37 @@ pub struct LogEntry {
     is_error: bool,
 }
 
+pub struct VersionInfo {
+    pub version_code: String,
+    pub update_url: String,
+    pub version_string: String,
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum InstallerState {
+    Updater,
+    Terms,
+    Location,
+    Installing,
+    Finished,
+}
+
+fn get_default_install_path() -> String {
+    unsafe {
+        match SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) {
+            Ok(path) => {
+                let s = path.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(path.as_ptr() as _));
+                PathBuf::from(s)
+                    .join("DREAMIO AI-Powered Adventures")
+                    .to_string_lossy()
+                    .to_string()
+            }
+            Err(_) => r"C:\DREAMIO".to_string(),
+        }
+    }
+}
+
 pub struct UpdateGUI {
     logs: Vec<LogEntry>,
     progress: f32,
@@ -124,6 +165,11 @@ pub struct UpdateGUI {
     taskbar: Option<Taskbar>,
     window_handle: Option<HWND>,
     flashing: bool,
+    installer_state: InstallerState,
+    terms_accepted: bool,
+    install_path: String,
+    create_desktop_shortcut: bool,
+    create_startmenu_shortcut: bool,
 }
 
 impl UpdateGUI {
@@ -135,6 +181,15 @@ impl UpdateGUI {
         let image_buffer = image.to_rgba8();
         let pixels = image_buffer.as_flat_samples();
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+
+        let version_exists = Path::new("version.json").exists();
+        let installer_state = if version_exists {
+            InstallerState::Updater
+        } else {
+            InstallerState::Terms
+        };
+
+        let install_path = get_default_install_path();
 
         let app = Self {
             logs: vec![],
@@ -158,8 +213,15 @@ impl UpdateGUI {
             taskbar: Taskbar::new(),
             window_handle: None,
             flashing: false,
+            installer_state,
+            terms_accepted: false,
+            install_path,
+            create_desktop_shortcut: true,
+            create_startmenu_shortcut: true,
         };
-        app.start_update_thread();
+        if installer_state == InstallerState::Updater {
+            app.start_update_thread();
+        }
         app
     }
 
@@ -169,7 +231,8 @@ impl UpdateGUI {
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
-                update_task(sender).await;
+                let target_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                update_task(sender, target_path).await;
             });
         });
     }
@@ -177,6 +240,16 @@ impl UpdateGUI {
     #[cfg(test)]
     fn start_update_thread(&self) {
         // Do not start the thread in tests
+    }
+
+    fn start_install_thread(&self, target_path: PathBuf) {
+        let sender = self.update_sender.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                update_task(sender, target_path).await;
+            });
+        });
     }
 
     fn retry(&mut self) {
@@ -273,28 +346,41 @@ impl App for UpdateGUI {
                         taskbar.set_progress_state(hwnd, ProgressState::NoProgress);
                     }
                     self.update_complete = true;
-                    self.logs.push(LogEntry {
-                        message: "Launching game...".to_string(),
-                        is_error: false,
-                    });
-                    match Command::new("Dreamio.exe").spawn() {
-                        Ok(_) => {
-                            self.logs.push(LogEntry {
-                                message: "Game launched successfully.".to_string(),
-                                is_error: false,
-                            });
-                            let mut state = self.shared_state.lock().unwrap();
-                            state.update_complete = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        Err(e) => {
-                            self.logs.push(LogEntry {
-                                message: format!("Failed to launch game: {}", e),
-                                is_error: true,
-                            });
-                            let mut state = self.shared_state.lock().unwrap();
-                            state.update_complete = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+
+                    if self.installer_state == InstallerState::Installing {
+                        let path = PathBuf::from(&self.install_path);
+                        copy_updater_to_install_dir(&path).ok();
+                        create_shortcuts(
+                            &path,
+                            self.create_desktop_shortcut,
+                            self.create_startmenu_shortcut,
+                        );
+                        register_uninstaller(&path).ok();
+                        self.installer_state = InstallerState::Finished;
+                    } else {
+                        self.logs.push(LogEntry {
+                            message: "Launching game...".to_string(),
+                            is_error: false,
+                        });
+                        match Command::new("Dreamio.exe").spawn() {
+                            Ok(_) => {
+                                self.logs.push(LogEntry {
+                                    message: "Game launched successfully.".to_string(),
+                                    is_error: false,
+                                });
+                                let mut state = self.shared_state.lock().unwrap();
+                                state.update_complete = true;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(e) => {
+                                self.logs.push(LogEntry {
+                                    message: format!("Failed to launch game: {}", e),
+                                    is_error: true,
+                                });
+                                let mut state = self.shared_state.lock().unwrap();
+                                state.update_complete = true;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
                         }
                     }
                 }
@@ -323,69 +409,177 @@ impl App for UpdateGUI {
 
             ui.separator();
 
-            ui.label(&self.status);
+            match self.installer_state {
+                InstallerState::Terms => {
+                    ui.heading("Welcome to DREAMIO Setup");
+                    ui.label("Please review the terms below.");
+                }
+                InstallerState::Location => {
+                    ui.heading("Installation Options");
+                    ui.label("Choose where to install DREAMIO.");
+                }
+                InstallerState::Finished => {
+                    ui.heading("Installation Complete");
+                    ui.label("DREAMIO has been successfully installed.");
+                }
+                InstallerState::Updater | InstallerState::Installing => {
+                    ui.label(&self.status);
 
-            let progress_text = if self.status == "Applying update..." {
-                self.applying_progress.clone()
-            } else {
-                format!(
-                    "[{}] {}/{} ({}/s, ETA: {})",
-                    format_duration(self.elapsed),
-                    format_bytes(self.bytes_downloaded),
-                    format_bytes(self.total_bytes),
-                    format_bytes(self.bytes_per_sec as u64),
-                    format_duration(self.eta)
-                )
-            };
-            ui.add(
-                egui::ProgressBar::new(self.progress)
-                    .fill(egui::Color32::from_hex("#ddb99b").unwrap()),
-            );
-            ui.label(progress_text);
+                    let progress_text = if self.status == "Applying update..." {
+                        self.applying_progress.clone()
+                    } else {
+                        format!(
+                            "[{}] {}/{} ({}/s, ETA: {})",
+                            format_duration(self.elapsed),
+                            format_bytes(self.bytes_downloaded),
+                            format_bytes(self.total_bytes),
+                            format_bytes(self.bytes_per_sec as u64),
+                            format_duration(self.eta)
+                        )
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(self.progress)
+                            .fill(egui::Color32::from_hex("#ddb99b").unwrap()),
+                    );
+                    ui.label(progress_text);
 
-            if self.update_failed {
-                ui.separator();
+                    if self.update_failed {
+                        ui.separator();
 
-                if self.last_error_response.is_some() {
-                    ui.heading("A security appliance or firewall might be blocking the request. Please check your firewall software, for instance Xfinity Advanced Security.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Retry").clicked() {
-                            self.retry();
-                        }
-                        if ui.button("More details").clicked() {
-                            if let Some(response) = &self.last_error_response {
-                                let path = std::env::temp_dir().join("dreamio-updater-error.html");
-                                if let Ok(mut file) = std::fs::File::create(&path) {
-                                    if file.write_all(response.as_bytes()).is_ok() {
-                                        opener::open(path).ok();
+                        if self.last_error_response.is_some() {
+                            ui.heading("A security appliance or firewall might be blocking the request. Please check your firewall software, for instance Xfinity Advanced Security.");
+                            ui.horizontal(|ui| {
+                                if ui.button("Retry").clicked() {
+                                    self.retry();
+                                }
+                                if ui.button("More details").clicked() {
+                                    if let Some(response) = &self.last_error_response {
+                                        let path = std::env::temp_dir().join("dreamio-updater-error.html");
+                                        if let Ok(mut file) = std::fs::File::create(&path) {
+                                            if file.write_all(response.as_bytes()).is_ok() {
+                                                opener::open(path).ok();
+                                            }
+                                        }
                                     }
                                 }
+                            });
+                        } else {
+                            ui.heading("Please try again. If the issue persists, you can download the latest version of the game manually:");
+                            ui.hyperlink("https://storage.googleapis.com/dreamio/downloads/Builds/Windows/latest.zip");
+                            if ui.button("Retry").clicked() {
+                                self.retry();
                             }
                         }
-                    });
-                } else {
-                    ui.heading("Please try again. If the issue persists, you can download the latest version of the game manually:");
-                    ui.hyperlink("https://storage.googleapis.com/dreamio/downloads/Builds/Windows/latest.zip");
-                    if ui.button("Retry").clicked() {
-                        self.retry();
                     }
                 }
             }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for log in &self.logs {
-                    let text = if log.is_error {
-                        egui::RichText::new(&log.message)
-                            .color(egui::Color32::RED)
-                            .monospace()
-                    } else {
-                        egui::RichText::new(&log.message).monospace()
-                    };
-                    ui.label(text);
+            match self.installer_state {
+                InstallerState::Terms => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label("Before installing, please review Privacy Policy and Terms and Conditions.");
+                        ui.hyperlink("https://dreamio.xyz/privacy-policy/");
+                        ui.hyperlink("https://dreamio.xyz/terms-and-conditions/");
+                        ui.add_space(20.0);
+                        ui.checkbox(&mut self.terms_accepted, "I accept the Privacy Policy and Terms and Conditions");
+                        ui.add_space(20.0);
+                        if ui.add_enabled(self.terms_accepted, egui::Button::new("Next")).clicked() {
+                            self.installer_state = InstallerState::Location;
+                        }
+                    });
                 }
-            });
+                InstallerState::Location => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label("Install Location:");
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut self.install_path);
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = FileDialog::new().pick_folder() {
+                                    let mut new_path = path;
+                                    let path_str = new_path.to_string_lossy().to_string();
+                                    if !path_str.to_lowercase().contains("dreamio") {
+                                        new_path = new_path.join("DREAMIO AI-Powered Adventures");
+                                    }
+                                    self.install_path = new_path.display().to_string();
+                                }
+                            }
+                            if ui.button("Reset").clicked() {
+                                self.install_path = get_default_install_path();
+                            }
+                        });
+                        ui.add_space(10.0);
+                        ui.checkbox(&mut self.create_desktop_shortcut, "Create Desktop Shortcut");
+                        ui.checkbox(&mut self.create_startmenu_shortcut, "Create Start Menu Shortcut");
+                        ui.add_space(20.0);
+                        if ui.button("Install").clicked() {
+                            let path = PathBuf::from(&self.install_path);
+                            match std::fs::create_dir_all(&path) {
+                                Ok(_) => {
+                                    self.installer_state = InstallerState::Installing;
+                                    self.start_install_thread(path);
+                                }
+                                Err(e) => {
+                                    let mut message = format!("Failed to create directory: {}.", path.display());
+                                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                                        message.push_str("\nAdministrator privileges might be required.");
+                                    } else {
+                                        message.push_str(&format!(" {}", e));
+                                    }
+                                    self.logs.push(LogEntry {
+                                        message,
+                                        is_error: true,
+                                    });
+                                }
+                            }
+                        }
+                        for log in &self.logs {
+                            if log.is_error {
+                                ui.colored_label(egui::Color32::RED, &log.message);
+                            }
+                        }
+                    });
+                }
+                InstallerState::Finished => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label("Installation has completed successfully.");
+                        ui.add_space(20.0);
+                        if ui.button("Launch DREAMIO").clicked() {
+                            let exe_path = PathBuf::from(&self.install_path).join("Dreamio.exe");
+                            match Command::new(&exe_path).spawn() {
+                                Ok(_) => {
+                                    let mut state = self.shared_state.lock().unwrap();
+                                    state.update_complete = true;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                                Err(e) => {
+                                    ui.colored_label(egui::Color32::RED, format!("Failed to launch: {}", e));
+                                }
+                            }
+                        }
+                        if ui.button("Exit").clicked() {
+                            let mut state = self.shared_state.lock().unwrap();
+                            state.update_complete = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+                }
+                InstallerState::Updater | InstallerState::Installing => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for log in &self.logs {
+                            let text = if log.is_error {
+                                egui::RichText::new(&log.message)
+                                    .color(egui::Color32::RED)
+                                    .monospace()
+                            } else {
+                                egui::RichText::new(&log.message).monospace()
+                            };
+                            ui.label(text);
+                        }
+                    });
+                }
+            }
         });
 
         if !self.update_complete || self.flashing {
@@ -394,13 +588,13 @@ impl App for UpdateGUI {
     }
 }
 
-async fn update_task(sender: Sender<UpdateMessage>) {
+async fn update_task(sender: Sender<UpdateMessage>, target_path: PathBuf) {
     sender
         .send(UpdateMessage::Status("Checking for updates...".to_string()))
         .unwrap();
 
-    let update_zip_path = PathBuf::from("update.zip");
-    let version_file_path = Path::new("version.json");
+    let update_zip_path = target_path.join("update.zip");
+    let version_file_path = target_path.join("version.json");
 
     let mut system = System::new();
     system.refresh_processes();
@@ -458,7 +652,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
     }
 
     if update_zip_path.exists() {
-        if let Err(e) = apply_update(&update_zip_path, &sender) {
+        if let Err(e) = apply_update(&update_zip_path, &target_path, &sender) {
             sender
                 .send(UpdateMessage::Error(
                     format!("Failed to apply update: {}", e),
@@ -466,10 +660,10 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                 ))
                 .unwrap();
             sender.send(UpdateMessage::UpdateFailed).unwrap();
-            cleanup();
+            cleanup(&target_path);
             return;
         }
-        cleanup();
+        cleanup(&target_path);
     }
 
     if !version_file_path.exists() {
@@ -478,7 +672,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
             .unwrap();
         match get_latest_update_url() {
             Ok(latest_url) => {
-                if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path, &sender) {
+                if let Err(e) = download_and_apply_update(&latest_url, &update_zip_path, &target_path, &sender) {
                     sender
                         .send(UpdateMessage::Error(
                             format!("Failed to download or apply update: {}", e),
@@ -486,7 +680,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                         ))
                         .unwrap();
                     sender.send(UpdateMessage::UpdateFailed).unwrap();
-                    cleanup();
+                    cleanup(&target_path);
                     return;
                 }
             }
@@ -512,26 +706,30 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                         .unwrap();
                 }
                 sender.send(UpdateMessage::UpdateFailed).unwrap();
-                cleanup();
+                cleanup(&target_path);
                 return;
             }
         }
     }
 
     loop {
-        match get_version_info() {
-            Ok((version_code, update_url)) => {
+        match get_version_info(&target_path) {
+            Ok(info) => {
+                let version_code = info.version_code;
+                let update_url = info.update_url;
+
                 sender
                     .send(UpdateMessage::Log(format!(
                         "Downloading update for version {}...",
                         version_code
                     )))
                     .unwrap();
-                match download_and_apply_update(&update_url, &update_zip_path, &sender) {
+                match download_and_apply_update(&update_url, &update_zip_path, &target_path, &sender) {
                     Ok(_) => {
-                        match get_version_info() {
-                            Ok((new_version_code, _)) => {
-                                if new_version_code == version_code {
+                        match get_version_info(&target_path) {
+                            Ok(new_info) => {
+                                update_registry_version(&target_path, &new_info.version_string).ok();
+                                if new_info.version_code == version_code {
                                     sender
                                         .send(UpdateMessage::Log(
                                             "Update complete. No more updates available."
@@ -549,7 +747,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                                     ))
                                     .unwrap();
                                 sender.send(UpdateMessage::UpdateFailed).unwrap();
-                                cleanup();
+                                cleanup(&target_path);
                                 return;
                             }
                         }
@@ -570,7 +768,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                                 ))
                                 .unwrap();
                             sender.send(UpdateMessage::UpdateFailed).unwrap();
-                            cleanup();
+                            cleanup(&target_path);
                             return;
                         }
                     }
@@ -584,7 +782,7 @@ async fn update_task(sender: Sender<UpdateMessage>) {
                     ))
                     .unwrap();
                 sender.send(UpdateMessage::UpdateFailed).unwrap();
-                cleanup();
+                cleanup(&target_path);
                 return;
             }
         }
@@ -679,6 +877,7 @@ fn download_file(
 fn download_and_apply_update(
     url: &str,
     update_zip_path: &Path,
+    base_path: &Path,
     sender: &Sender<UpdateMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sender
@@ -697,8 +896,8 @@ fn download_and_apply_update(
             return Err(e);
         }
     }
-    apply_update(update_zip_path, sender)?;
-    cleanup();
+    apply_update(update_zip_path, base_path, sender)?;
+    cleanup(base_path);
     Ok(())
 }
 
@@ -737,8 +936,8 @@ fn get_latest_update_url() -> Result<String, Box<dyn std::error::Error>> {
     Ok(update_url)
 }
 
-fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
-    let version_file_path = Path::new("version.json");
+fn get_version_info(base_path: &Path) -> Result<VersionInfo, Box<dyn std::error::Error>> {
+    let version_file_path = base_path.join("version.json");
     let version_content = fs::read_to_string(version_file_path)?;
     let json: Value = serde_json::from_str(&version_content)?;
 
@@ -747,15 +946,24 @@ fn get_version_info() -> Result<(String, String), Box<dyn std::error::Error>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid versionCode in JSON"))?
         .to_string();
 
+    let version_string = json["version"]
+        .as_str()
+        .unwrap_or(&version_code)
+        .to_string();
+
     let update_url = format!(
         "https://storage.googleapis.com/dreamio/downloads/Builds/Windows/patches/{}.zip",
         version_code
     );
 
-    Ok((version_code, update_url))
+    Ok(VersionInfo {
+        version_code,
+        update_url,
+        version_string,
+    })
 }
 
-fn apply_update(update_zip_path: &Path, sender: &Sender<UpdateMessage>) -> io::Result<()> {
+fn apply_update(update_zip_path: &Path, base_path: &Path, sender: &Sender<UpdateMessage>) -> io::Result<()> {
     sender
         .send(UpdateMessage::Status("Applying update...".to_string()))
         .unwrap();
@@ -780,7 +988,7 @@ fn apply_update(update_zip_path: &Path, sender: &Sender<UpdateMessage>) -> io::R
                 continue;
             }
         };
-        let out_path = PathBuf::from(file.name());
+        let out_path = base_path.join(file.name());
 
         if out_path
             .file_name()
@@ -908,8 +1116,8 @@ fn apply_update(update_zip_path: &Path, sender: &Sender<UpdateMessage>) -> io::R
     Ok(())
 }
 
-fn cleanup() {
-    let update_zip_path = PathBuf::from("update.zip");
+fn cleanup(base_path: &Path) {
+    let update_zip_path = base_path.join("update.zip");
     if update_zip_path.exists() {
         fs::remove_file(&update_zip_path).ok();
     }
@@ -941,10 +1149,249 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn copy_updater_to_install_dir(install_path: &Path) -> std::io::Result<()> {
+    let current_exe = env::current_exe()?;
+    let target_exe = install_path.join("DreamioUpdater.exe");
+    if current_exe != target_exe {
+        fs::copy(current_exe, target_exe)?;
+    }
+    Ok(())
+}
+
+fn create_shortcut(
+    target: &Path,
+    shortcut_path: &Path,
+    description: &str,
+) -> windows::core::Result<()> {
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+
+        let target_h = HSTRING::from(target.as_os_str().to_str().unwrap_or_default());
+        link.SetPath(PCWSTR::from_raw(target_h.as_ptr()))?;
+
+        let desc_h = HSTRING::from(description);
+        link.SetDescription(PCWSTR::from_raw(desc_h.as_ptr()))?;
+
+        if let Some(parent) = target.parent() {
+            let parent_h = HSTRING::from(parent.as_os_str().to_str().unwrap_or_default());
+            link.SetWorkingDirectory(PCWSTR::from_raw(parent_h.as_ptr()))?;
+        }
+
+        let persist: IPersistFile = link.cast()?;
+        let shortcut_h = HSTRING::from(shortcut_path.as_os_str().to_str().unwrap_or_default());
+        persist.Save(PCWSTR::from_raw(shortcut_h.as_ptr()), true)?;
+
+        Ok(())
+    }
+}
+
+fn create_shortcuts(install_path: &Path, create_desktop: bool, create_startmenu: bool) {
+    let exe_path = install_path.join("Dreamio.exe");
+    let description = "DREAMIO: AI-Powered Adventures";
+
+    if create_desktop {
+        unsafe {
+            if let Ok(path) = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None) {
+                let s = path.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(path.as_ptr() as _));
+                let desktop_path = PathBuf::from(s).join("DREAMIO AI-Powered Adventures.lnk");
+                create_shortcut(&exe_path, &desktop_path, description).ok();
+            }
+        }
+    }
+
+    if create_startmenu {
+        unsafe {
+            if let Ok(path) = SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, None) {
+                let s = path.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(path.as_ptr() as _));
+                let programs_path = PathBuf::from(s).join("DREAMIO AI-Powered Adventures");
+                fs::create_dir_all(&programs_path).ok();
+                let link_path = programs_path.join("DREAMIO AI-Powered Adventures.lnk");
+                create_shortcut(&exe_path, &link_path, description).ok();
+            }
+        }
+    }
+}
+
+fn update_registry_version(_install_path: &Path, version_string: &str) -> windows::core::Result<()> {
+    let subkey =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Oleg Skutte DREAMIO: AI-Powered Adventures";
+    let subkey_h = HSTRING::from(subkey);
+
+    let mut hkey = HKEY::default();
+    unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR::from_raw(subkey_h.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hkey,
+            None,
+        )?;
+    }
+
+    let write_str = |name: &str, value: &str| -> windows::core::Result<()> {
+        let name_h = HSTRING::from(name);
+        let mut val_vec: Vec<u16> = value.encode_utf16().collect();
+        val_vec.push(0);
+
+        let slice_u8 =
+            unsafe { std::slice::from_raw_parts(val_vec.as_ptr() as *const u8, val_vec.len() * 2) };
+
+        unsafe {
+            RegSetValueExW(
+                hkey,
+                PCWSTR::from_raw(name_h.as_ptr()),
+                0,
+                REG_SZ,
+                Some(slice_u8),
+            )?;
+        }
+        Ok(())
+    };
+
+    write_str("DisplayVersion", version_string)?;
+
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    };
+
+    Ok(())
+}
+
+fn register_uninstaller(install_path: &Path) -> windows::core::Result<()> {
+    let subkey =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Oleg Skutte DREAMIO: AI-Powered Adventures";
+    let subkey_h = HSTRING::from(subkey);
+
+    let mut hkey = HKEY::default();
+    unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR::from_raw(subkey_h.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hkey,
+            None,
+        )?;
+    }
+
+    let write_str = |name: &str, value: &str| -> windows::core::Result<()> {
+        let name_h = HSTRING::from(name);
+        let mut val_vec: Vec<u16> = value.encode_utf16().collect();
+        val_vec.push(0);
+
+        let slice_u8 =
+            unsafe { std::slice::from_raw_parts(val_vec.as_ptr() as *const u8, val_vec.len() * 2) };
+
+        unsafe {
+            RegSetValueExW(
+                hkey,
+                PCWSTR::from_raw(name_h.as_ptr()),
+                0,
+                REG_SZ,
+                Some(slice_u8),
+            )?;
+        }
+        Ok(())
+    };
+
+    let exe_path = install_path.join("DreamioUpdater.exe");
+    let display_icon = install_path.join("Dreamio.exe");
+
+    let version_info = get_version_info(install_path)
+        .map(|v| v.version_string)
+        .unwrap_or_default();
+
+    write_str("DisplayName", "DREAMIO: AI-Powered Adventures")?;
+    write_str(
+        "UninstallString",
+        &format!("\"{}\" --uninstall", exe_path.to_string_lossy()),
+    )?;
+    write_str("InstallLocation", &install_path.to_string_lossy())?;
+    write_str("DisplayIcon", &display_icon.to_string_lossy())?;
+    write_str("Publisher", "Oleg Skutte")?;
+    write_str("DisplayVersion", &version_info)?;
+
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    };
+
+    Ok(())
+}
+
+fn perform_uninstall() {
+    let exe_path = env::current_exe().unwrap_or_default();
+    let install_path = exe_path.parent().unwrap_or(Path::new("."));
+
+    // Delete Shortcuts
+    unsafe {
+        if let Ok(path) = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None) {
+            let s = path.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(path.as_ptr() as _));
+            let link = PathBuf::from(s).join("DREAMIO AI-Powered Adventures.lnk");
+            let _ = fs::remove_file(link);
+        }
+    }
+
+    unsafe {
+        if let Ok(path) = SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, None) {
+            let s = path.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(path.as_ptr() as _));
+            let dir = PathBuf::from(s).join("DREAMIO AI-Powered Adventures");
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    // Delete Registry
+    let subkey =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Oleg Skutte DREAMIO: AI-Powered Adventures";
+    let subkey_h = HSTRING::from(subkey);
+    unsafe {
+        let _ = RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR::from_raw(subkey_h.as_ptr()));
+    }
+
+    // Self-delete
+    let _ = Command::new("cmd")
+        .args([
+            "/C",
+            "ping",
+            "127.0.0.1",
+            "-n",
+            "3",
+            ">",
+            "nul",
+            "&",
+            "rmdir",
+            "/s",
+            "/q",
+            &install_path.to_string_lossy(),
+        ])
+        .spawn();
+
+    std::process::exit(0);
+}
+
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 && args[1] == "--uninstall" {
+        perform_uninstall();
+        return;
+    }
+
+    let version_exists = Path::new("version.json").exists();
+    let initial_width = if version_exists { 272.0 } else { 450.0 };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([272.0, 500.0])
+            .with_inner_size([initial_width, 500.0])
             .with_min_inner_size([272.0, 294.0])
             .with_icon(load_icon()),
         run_and_return: true,
