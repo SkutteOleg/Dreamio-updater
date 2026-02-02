@@ -402,8 +402,8 @@ async fn update_task(sender: Sender<UpdateMessage>) {
     let update_zip_path = PathBuf::from("update.zip");
     let version_file_path = Path::new("version.json");
 
-    let mut system = System::new_all();
-    system.refresh_all();
+    let mut system = System::new();
+    system.refresh_processes();
 
     let pids_to_kill: Vec<_> = system
         .processes_by_name("Dreamio.exe")
