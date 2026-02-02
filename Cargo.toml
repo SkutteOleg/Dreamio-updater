@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 zip = "0.6.4"
 sysinfo = "0.28.2"
-windows = { version = "0.52.0", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com"] }
+windows = { version = "0.52.0", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Registry", "Win32_Security"] }
 qbsdiff = "1.4"
 reqwest = { version = "0.11", features = ["json", "blocking"] }
 serde_json = "1.0"
@@ -19,6 +19,7 @@ crossbeam-channel = "0.5.15"
 image = { version = "0.25.1", default-features = false, features = ["ico"] }
 raw-window-handle = "0.6.2"
 opener = "0.8.3"
+rfd = "0.14"
 
 [build-dependencies]
 embed-resource = "2.2"
