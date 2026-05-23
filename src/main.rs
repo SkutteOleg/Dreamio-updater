@@ -1044,17 +1044,32 @@ fn apply_update(update_zip_path: &Path, base_path: &Path, sender: &Sender<Update
         } else if file.name().ends_with(".delete") {
             let file_to_delete = out_path.with_extension("");
             if file_to_delete.exists() {
-                if let Err(e) = fs::remove_file(&file_to_delete) {
-                    sender
-                        .send(UpdateMessage::Error(
-                            format!(
-                                "Error deleting file {}: {}. Skipping.",
-                                file_to_delete.display(),
-                                e
-                            ),
-                            None,
-                        ))
-                        .unwrap();
+                if file_to_delete.is_dir() {
+                    if let Err(e) = fs::remove_dir_all(&file_to_delete) {
+                        sender
+                            .send(UpdateMessage::Error(
+                                format!(
+                                    "Error deleting directory {}: {}. Skipping.",
+                                    file_to_delete.display(),
+                                    e
+                                ),
+                                None,
+                            ))
+                            .unwrap();
+                    }
+                } else {
+                    if let Err(e) = fs::remove_file(&file_to_delete) {
+                        sender
+                            .send(UpdateMessage::Error(
+                                format!(
+                                    "Error deleting file {}: {}. Skipping.",
+                                    file_to_delete.display(),
+                                    e
+                                ),
+                                None,
+                            ))
+                            .unwrap();
+                    }
                 }
             }
         } else {
