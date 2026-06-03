@@ -7,6 +7,7 @@ use qbsdiff::Bspatch;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use reqwest;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
@@ -514,7 +515,12 @@ impl App for UpdateGUI {
                         ui.checkbox(&mut self.create_startmenu_shortcut, "Create Start Menu Shortcut");
                         ui.add_space(20.0);
                         if ui.button("Install").clicked() {
-                            let path = PathBuf::from(&self.install_path);
+                            let mut path = PathBuf::from(&self.install_path);
+                            let path_str = path.to_string_lossy().to_string();
+                            if !path_str.to_lowercase().contains("dreamio") {
+                                path = path.join("DREAMIO AI-Powered Adventures");
+                                self.install_path = path.display().to_string();
+                            }
                             match std::fs::create_dir_all(&path) {
                                 Ok(_) => {
                                     self.installer_state = InstallerState::Installing;
@@ -975,6 +981,18 @@ fn apply_update(update_zip_path: &Path, base_path: &Path, sender: &Sender<Update
     let current_exe = env::current_exe()?;
     let current_exe_name = current_exe.file_name().unwrap().to_str().unwrap();
 
+    let manifest_path = base_path.join("install_manifest.txt");
+    let mut manifest = HashSet::new();
+    if manifest_path.exists() {
+        if let Ok(content) = fs::read_to_string(&manifest_path) {
+            for line in content.lines() {
+                if !line.is_empty() {
+                    manifest.insert(line.to_string());
+                }
+            }
+        }
+    }
+
     for i in 0..archive_len {
         let mut file = match archive.by_index(i) {
             Ok(file) => file,
@@ -997,6 +1015,8 @@ fn apply_update(update_zip_path: &Path, base_path: &Path, sender: &Sender<Update
         {
             continue;
         }
+
+        manifest.insert(file.name().to_string());
 
         if file.name().ends_with('/') {
             if let Err(e) = fs::create_dir_all(&out_path) {
@@ -1127,6 +1147,13 @@ fn apply_update(update_zip_path: &Path, base_path: &Path, sender: &Sender<Update
             ))
             .unwrap();
     }
+
+    let mut manifest_content = String::new();
+    for entry in manifest {
+        manifest_content.push_str(&entry);
+        manifest_content.push('\n');
+    }
+    fs::write(&manifest_path, manifest_content)?;
 
     Ok(())
 }
@@ -1346,6 +1373,25 @@ fn perform_uninstall() {
     let exe_path = env::current_exe().unwrap_or_default();
     let install_path = exe_path.parent().unwrap_or(Path::new("."));
 
+    let manifest_path = install_path.join("install_manifest.txt");
+    if manifest_path.exists() {
+        if let Ok(content) = fs::read_to_string(&manifest_path) {
+            let mut entries: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+            entries.sort_by_key(|a| std::cmp::Reverse(a.len()));
+            for entry in entries {
+                let target_path = install_path.join(entry);
+                if target_path.exists() {
+                    if target_path.is_dir() {
+                        let _ = fs::remove_dir(&target_path);
+                    } else {
+                        let _ = fs::remove_file(&target_path);
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_file(&manifest_path);
+    }
+
     // Delete Shortcuts
     unsafe {
         if let Ok(path) = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None) {
@@ -1384,9 +1430,11 @@ fn perform_uninstall() {
             ">",
             "nul",
             "&",
-            "rmdir",
-            "/s",
+            "del",
             "/q",
+            &exe_path.to_string_lossy(),
+            "&",
+            "rmdir",
             &install_path.to_string_lossy(),
         ])
         .spawn();
