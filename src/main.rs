@@ -594,6 +594,99 @@ impl App for UpdateGUI {
     }
 }
 
+
+fn install_vcredist(base_path: &Path, sender: &Sender<UpdateMessage>) {
+
+    sender
+        .send(UpdateMessage::Log("Installing Microsoft Visual C++ Redistributable...".to_string()))
+        .unwrap();
+
+    let url = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
+    let vcredist_path = base_path.join("vc_redist.x64.exe");
+
+    if let Err(e) = download_file(url, &vcredist_path, sender) {
+        sender
+            .send(UpdateMessage::Log(format!(
+                "Failed to download Microsoft Visual C++ Redistributable: {}",
+                e
+            )))
+            .unwrap();
+        return;
+    }
+
+    sender
+        .send(UpdateMessage::Log("Running Microsoft Visual C++ installer...".to_string()))
+        .unwrap();
+
+    match std::process::Command::new(&vcredist_path)
+        .args(["/install", "/quiet", "/norestart"])
+        .status()
+    {
+        Ok(status) => {
+            if status.success() {
+                sender
+                    .send(UpdateMessage::Log("Successfully installed Microsoft Visual C++ Redistributable.".to_string()))
+                    .unwrap();
+            } else {
+                sender
+                    .send(UpdateMessage::Log(format!("Microsoft Visual C++ installer returned non-zero status: {}", status)))
+                    .unwrap();
+            }
+        }
+        Err(e) => {
+            // Check if error is ERROR_ELEVATION_REQUIRED (740)
+            if e.raw_os_error() == Some(740) {
+                sender
+                    .send(UpdateMessage::Log("Elevation required. Prompting for administrator privileges...".to_string()))
+                    .unwrap();
+
+                // Fall back to powershell Start-Process -Verb RunAs
+                let escaped_path = vcredist_path.display().to_string().replace("'", "''");
+                let script = format!(
+                    "Start-Process -FilePath '{}' -ArgumentList '/install /quiet /norestart' -Verb RunAs -Wait",
+                    escaped_path
+                );
+
+                match std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+                    .status()
+                {
+                    Ok(status) => {
+                        if status.success() {
+                            sender
+                                .send(UpdateMessage::Log("Successfully installed Microsoft Visual C++ Redistributable with elevated privileges.".to_string()))
+                                .unwrap();
+                        } else {
+                            sender
+                                .send(UpdateMessage::Log(format!("Elevated Microsoft Visual C++ installer returned non-zero status: {}", status)))
+                                .unwrap();
+                        }
+                    }
+                    Err(elevated_e) => {
+                        sender
+                            .send(UpdateMessage::Log(format!(
+                                "Failed to run elevated Microsoft Visual C++ installer: {}",
+                                elevated_e
+                            )))
+                            .unwrap();
+                    }
+                }
+            } else {
+                sender
+                    .send(UpdateMessage::Log(format!(
+                        "Failed to run Microsoft Visual C++ installer: {}",
+                        e
+                    )))
+                    .unwrap();
+            }
+        }
+    }
+
+    if vcredist_path.exists() {
+        let _ = std::fs::remove_file(&vcredist_path);
+    }
+}
+
 async fn update_task(sender: Sender<UpdateMessage>, target_path: PathBuf) {
     sender
         .send(UpdateMessage::Status("Checking for updates...".to_string()))
@@ -601,7 +694,7 @@ async fn update_task(sender: Sender<UpdateMessage>, target_path: PathBuf) {
 
     let update_zip_path = target_path.join("update.zip");
     let version_file_path = target_path.join("version.json");
-
+    let is_initial_install = !version_file_path.exists();
     let mut system = System::new();
     system.refresh_processes();
 
@@ -800,6 +893,15 @@ async fn update_task(sender: Sender<UpdateMessage>, target_path: PathBuf) {
     sender
         .send(UpdateMessage::Log("Update process finished.".to_string()))
         .unwrap();
+    if is_initial_install {
+        let sender_clone = sender.clone();
+        let target_path_clone = target_path.clone();
+        tokio::task::spawn_blocking(move || {
+            install_vcredist(&target_path_clone, &sender_clone);
+        })
+            .await
+            .unwrap();
+    }
     sender.send(UpdateMessage::UpdateComplete).unwrap();
 }
 
