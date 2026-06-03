@@ -1374,6 +1374,8 @@ fn perform_uninstall() {
     let install_path = exe_path.parent().unwrap_or(Path::new("."));
 
     let manifest_path = install_path.join("install_manifest.txt");
+    let mut use_legacy_uninstall = false;
+
     if manifest_path.exists() {
         if let Ok(content) = fs::read_to_string(&manifest_path) {
             let mut entries: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
@@ -1390,6 +1392,11 @@ fn perform_uninstall() {
             }
         }
         let _ = fs::remove_file(&manifest_path);
+    } else {
+        let path_str = install_path.to_string_lossy().to_string();
+        if path_str.to_lowercase().contains("dreamio") {
+            use_legacy_uninstall = true;
+        }
     }
 
     // Delete Shortcuts
@@ -1420,24 +1427,43 @@ fn perform_uninstall() {
     }
 
     // Self-delete
-    let _ = Command::new("cmd")
-        .args([
-            "/C",
-            "ping",
-            "127.0.0.1",
-            "-n",
-            "3",
-            ">",
-            "nul",
-            "&",
-            "del",
-            "/q",
-            &exe_path.to_string_lossy(),
-            "&",
-            "rmdir",
-            &install_path.to_string_lossy(),
-        ])
-        .spawn();
+    if use_legacy_uninstall {
+        let _ = Command::new("cmd")
+            .args([
+                "/C",
+                "ping",
+                "127.0.0.1",
+                "-n",
+                "3",
+                ">",
+                "nul",
+                "&",
+                "rmdir",
+                "/s",
+                "/q",
+                &install_path.to_string_lossy(),
+            ])
+            .spawn();
+    } else {
+        let _ = Command::new("cmd")
+            .args([
+                "/C",
+                "ping",
+                "127.0.0.1",
+                "-n",
+                "3",
+                ">",
+                "nul",
+                "&",
+                "del",
+                "/q",
+                &exe_path.to_string_lossy(),
+                "&",
+                "rmdir",
+                &install_path.to_string_lossy(),
+            ])
+            .spawn();
+    }
 
     std::process::exit(0);
 }
